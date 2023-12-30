@@ -5,5 +5,5 @@ class DattaBotAPI:
     def __init__(self) -> None:
         self.agent = DattaBotAgent()
 
-    def respond_to_query(self, input: str):
-        return self.agent.respond_to_query(query=input)
+    def respond_to_query(self, query: str):
+        return self.agent.respond_to_query(query=query)
