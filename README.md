@@ -2,6 +2,19 @@
 
 A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try other approaches, like doing it in rust, if it serves value.
 
+# How to interact with bot (run either of them)
+
+For windows:
+`.\run.bat`
+
+For linux/mac:
+`./run.sh`
+
+Run python client:
+`python client.py`
+
+For information on python virtual environment: [notes.md](notes.md)
+
 # Motivation
 
 -   Have fun learning more about AI

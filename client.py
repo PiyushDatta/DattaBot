@@ -6,7 +6,7 @@ class DattaCommandLineClient:
     def __init__(self) -> None:
         self.logger = get_default_logger()
         self.api = DattaBotAPI()
-        self.logger.info("Interactive CLI Session. Type 'exit' to end the session.")
+        self.logger.info("Interactive CLI Session. Type 'exit' to end the session.\n")
 
     def process_input(self, input_text: str):
         return self.api.respond_to_query(query=input_text)
@@ -22,7 +22,7 @@ class DattaCommandLineClient:
                     break
                 # Process the input and get the output
                 output_text = self.process_input(user_input)
-                self.logger.info(output_text)
+                self.logger.info(output_text + "\n")
             except KeyboardInterrupt:
                 self.logger.info("KeyboardInterrupt. Exiting the session. Goodbye!")
                 break
