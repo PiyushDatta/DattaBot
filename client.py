@@ -1,10 +1,10 @@
-from src.util import get_default_logger
+from src.logger import get_logger
 from src.api import DattaBotAPI
 
 
 class DattaCommandLineClient:
     def __init__(self) -> None:
-        self.logger = get_default_logger()
+        self.logger = get_logger()
         self.api = DattaBotAPI()
         self.logger.info("Interactive CLI Session. Type 'exit' to end the session.\n")
 

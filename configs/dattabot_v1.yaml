@@ -1,0 +1,23 @@
+neural_net:
+    hidden_nodes_1: 256
+    hidden_nodes_2: 256
+agent:
+    max_grad_norm: 100
+    gamma: 0.99
+    tau: 0.005
+    lr: 0.0001
+    epsilon_start: 0.9
+    epsilon_min: 0.05
+    epsilon_decay: 1000
+env:
+    env_name: "None"
+    num_update_target: 1
+    num_save_weights: 50
+    batch_size: 128
+    train: true
+    plot_training: false
+    training_episodes: 1000
+    validate: true
+    plot_validation: false
+    validating_episodes: 100
+    logging_level: "INFO"
