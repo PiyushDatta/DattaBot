@@ -1,6 +1,11 @@
 import os
 from sentencepiece import SentencePieceProcessor
-from src.util import TOKENIZER_MODEL_PATH
+from torch import Tensor
+from src.util import (
+    TOKENIZER_MODEL_PATH,
+    convert_tensor_output_to_str,
+    make_tensor_from_input,
+)
 from src.logger import get_logger
 from src.agent_config import get_agent_config
 from src.model import DattaBotModel
@@ -25,16 +30,24 @@ class Agent:
         # Setup model.
         self.model = DattaBotModel(tokenizer=self.tokenizer)
 
-    def respond_to_query(self, query: str) -> str:
-        encoded = self.tokenizer_encode(query=query)
-        # TODO(piydatta): Replace below with `output = self.model(src_input=encoded)`.
-        output = encoded
-        self.logger.info(f"Encoded: {encoded}")
+    def respond_to_queries(self, queries: list[str]) -> str:
+        # Encode the list of queries using the tokenizer.
+        encodings: list[list[int]] = self.tokenizer_encode(queries=queries)
+        self.logger.info(f"Encoded: {encodings}")
+        # Convert the query string to a Tensor and feed into our model.
+        encoded_tensor_input: Tensor = make_tensor_from_input(
+            src_input=encodings, config=self.config
+        )
+        self.logger.info(f"Encoded tensor inputs for the model: {encoded_tensor_input}")
+        encoded_tensor_output: Tensor = self.model(src_input=encoded_tensor_input)
+        # Convert the Tensor from the model to a output string.
+        output: str = convert_tensor_output_to_str(encoded_tensor_output)
         self.logger.info(f"Model output: {output}")
+        # Return the output after decoding the output using the tokenizer.
         return self.tokenizer_decode(encoded=output)
 
-    def tokenizer_encode(self, query: str) -> list[int]:
-        return self.tokenizer.encode(query)
+    def tokenizer_encode(self, queries: list[str]) -> list[list[int]]:
+        return [self.tokenizer.encode(query) for query in queries]
 
     def tokenizer_decode(self, encoded: str) -> str:
         return self.tokenizer.decode(encoded)

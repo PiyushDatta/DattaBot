@@ -1,7 +1,15 @@
-import torch
-from torch import nn, tensor
+from torch import (
+    nn,
+    tensor,
+    matmul,
+    Tensor,
+    set_default_device as torch_set_default_device,
+    set_default_dtype as torch_set_default_dtype,
+    float64 as torch_float64,
+)
 from math import sqrt as math_sqrt
 from sentencepiece import SentencePieceProcessor
+from src.logger import get_logger
 from src.agent_config import get_agent_config
 
 
@@ -9,9 +17,11 @@ from src.agent_config import get_agent_config
 class DattaBotModel(nn.Module):
     def __init__(self, tokenizer: SentencePieceProcessor) -> None:
         super().__init__()
+        self.logger = get_logger()
         self.config = get_agent_config()
         self.device = self.config.env.device
-        torch.set_default_device(self.device)
+        torch_set_default_device(self.device)
+        torch_set_default_dtype(torch_float64)
         # Assumes tokenizer is already setup.
         self.tokenizer = tokenizer
         self.vocab_size = self.tokenizer.vocab_size
@@ -25,7 +35,7 @@ class DattaBotModel(nn.Module):
             model_dimensions=self.model_dimensions,
         )
 
-    def forward(self, src_input) -> torch.Tensor:
+    def forward(self, src_input) -> Tensor:
         encoder_stack_output = self.encoder_stack(src_input)
         return encoder_stack_output
 
@@ -33,6 +43,7 @@ class DattaBotModel(nn.Module):
 class TransformerEncoderStack(nn.Module):
     def __init__(self, n_layers: int, n_heads: int, model_dimensions: int) -> None:
         super().__init__()
+        self.logger = get_logger()
         self.config = get_agent_config()
         self.n_layers = n_layers
         self.n_heads = n_heads
@@ -41,7 +52,7 @@ class TransformerEncoderStack(nn.Module):
         self.position_wise_ffn = TransformerPositionWiseFeedForward()
         self.norm_one = nn.LayerNorm(self.model_dimensions)
 
-    def forward(self, src_input) -> torch.Tensor:
+    def forward(self, src_input: Tensor) -> Tensor:
         orig_input = src_input
         # Multi-head attention.
         output = self.multi_head_attn(
@@ -62,6 +73,7 @@ class TransformerEncoderStack(nn.Module):
 class TransformerMultiHeadAttention(nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.logger = get_logger()
         self.config = get_agent_config()
         self.n_heads = self.config.neural_net.n_heads
         self.model_dimensions = self.config.neural_net.model_dimensions
@@ -73,10 +85,10 @@ class TransformerMultiHeadAttention(nn.Module):
 
     def forward(
         self,
-        input_query: torch.Tensor,
-        input_key: torch.Tensor,
-        input_value: torch.Tensor,
-    ) -> torch.Tensor:
+        input_query: Tensor,
+        input_key: Tensor,
+        input_value: Tensor,
+    ) -> Tensor:
         # Linear.
         query = self.query_layer(input_query)
         key = self.key_layer(input_key)
@@ -94,12 +106,14 @@ class TransformerMultiHeadAttention(nn.Module):
         # Linear and return output.
         return self.concat_layer(output)
 
-    def split(self, input_tensor: torch.Tensor):
+    def split(self, input_tensor: Tensor):
+        self.logger.info(f"Splitting this tensor: {input_tensor}")
+        self.logger.info(input_tensor.size())
         batch_size, n_heads, length, model_dimensions = input_tensor.size()
         model_depth = model_dimensions // n_heads
         return tensor.view(batch_size, length, n_heads, model_depth).transpose(1, 2)
 
-    def concat(self, input_tensor: torch.Tensor):
+    def concat(self, input_tensor: Tensor):
         """
         Opposite of split.
         """
@@ -119,11 +133,11 @@ class TransformerScaledDotProductAttention(nn.Module):
 
     def forward(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
         mask: int = None,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         # Tensor input is 4D tensor.
         _batch_size, _n_heads, _length, model_dimensions = key.size()
         # Transpose keys. K^T.
@@ -131,16 +145,14 @@ class TransformerScaledDotProductAttention(nn.Module):
         # Get dot product of queries with all keys.
         # Then divide by sqrt of model_dimensions (d_k).
         # This covers the first matmul and scale blocks inside ScaledDotProductAttention.
-        dot_product_score = torch.matmul(input=query, other=key) / math_sqrt(
-            model_dimensions
-        )
+        dot_product_score = matmul(input=query, other=key) / math_sqrt(model_dimensions)
         # Apply masking (optional).
         if mask is not None:
             dot_product_score = dot_product_score.masked_fill(mask == 0, -10000)
         # Apply softmax.
         attention_score = self.softmax(dot_product_score)
         # Matmul of our values and final attention score.
-        return torch.matmul(input=value, other=attention_score)
+        return matmul(input=value, other=attention_score)
 
 
 class TransformerPositionWiseFeedForward(nn.Module):
@@ -158,7 +170,7 @@ class TransformerPositionWiseFeedForward(nn.Module):
         self.relu_layer = nn.ReLU()
         self.dropout = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
 
-    def forward(self, src_input) -> torch.Tensor:
+    def forward(self, src_input) -> Tensor:
         output = self.linear_one(src_input)
         output = self.relu_layer(output)
         output = self.dropout(output)

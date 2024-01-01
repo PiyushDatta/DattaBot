@@ -9,7 +9,7 @@ class DattaCommandLineClient:
         self.logger.info("Interactive CLI Session. Type 'exit' to end the session.\n")
 
     def process_input(self, input_text: str):
-        return self.api.respond_to_query(query=input_text)
+        return self.api.respond_to_queries(queries=[input_text])
 
     def run(self) -> None:
         while True:
