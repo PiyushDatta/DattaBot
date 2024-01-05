@@ -1,8 +1,7 @@
 neural_net:
     n_layers: 6
     n_heads: 8
-    model_dimensions: 20
-    # model_dimensions: 512
+    model_dimensions: 512
     hidden_layers: 2048
     zeroed_drop_probability: 0.1
 agent:

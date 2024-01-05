@@ -31,8 +31,6 @@ class DattaBotModel(nn.Module):
         # Max tokens for response.
         self.response_max_tokens = self.config.agent.max_tokens
         self.logger.debug(f"Max tokens: {self.response_max_tokens}")
-
-        self.embedding = nn.Embedding(self.response_max_tokens, self.model_dimensions)
         self.encoder_stack = TransformerEncoderStack(
             n_layers=self.n_layers,
             n_heads=self.n_heads,
@@ -40,7 +38,6 @@ class DattaBotModel(nn.Module):
         )
 
     def forward(self, src_input: Tensor) -> Tensor:
-        src_input = self.embedding(src_input) * math_sqrt(self.model_dimensions)
         encoder_stack_output = self.encoder_stack(src_input)
         return encoder_stack_output
 
@@ -112,8 +109,8 @@ class TransformerMultiHeadAttention(nn.Module):
         return self.concat_layer(output)
 
     def split(self, input_tensor: Tensor):
-        self.logger.info(f"Splitting this tensor: {input_tensor}")
-        self.logger.info(input_tensor.size())
+        self.logger.debug(f"Splitting this tensor: {input_tensor}")
+        self.logger.debug(input_tensor.size())
         model_dimensions, batch_size = input_tensor.size()
         model_depth = model_dimensions // self.n_heads
         return input_tensor.view(model_depth, model_depth).transpose(1, 2)

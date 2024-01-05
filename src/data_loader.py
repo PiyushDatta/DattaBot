@@ -3,7 +3,6 @@ from torch import (
     Tensor,
     nn,
     float64 as torch_float64,
-    stack,
     cat,
     empty as torch_empty_tensor,
 )
@@ -43,11 +42,12 @@ class DataLoader:
         Returns tuple[Tensor, int].
         Returns tuple[queries converted to tensors, total number of batches].
         """
+        self.logger.debug(f"\nQueries:\n{queries}")
         # Encode the list of queries using the tokenizer.
         encodings: list[list[torch_float64]] = self.tokenizer_encode(
             decoded_queries=queries
         )
-        self.logger.info(f"Encoded: {encodings}")
+        self.logger.debug(f"\nEncoded queries:\n{encodings}")
         # For each encoded query:
         #   1. Convert to a tensor.
         #   2. Pad until max_sequence_len length.
@@ -71,23 +71,24 @@ class DataLoader:
         self.logger.debug(
             f"Encoded tensor:\n{encoded_tensor}\nwith shape: {encoded_tensor.shape}"
         )
-
-        # TODO(PiyushDatta): Do we need to filter empty tensors out?
-        #                    Is this the right way to do it?
-        # Filter the tensors for any empty tensors.
-        # encoded_tensor = cat(tuple(filter(lambda t: t.numel() > 0, encoded_tensor)))
-        # self.logger.debug(f"After filtering tensors: {encoded_tensor}")
-
-        # Divide the tensors into batch_sized separate sequences.
-        sequence_len = encoded_tensor.size(0)
-        # Trim the tensors. Trim/get rid of the excess.
+        # Record the total batch size and sequence length before the next step
+        # (combining into 1 tensor and filtering).
+        total_batch_size = encoded_tensor.size(0)
+        sequence_len = encoded_tensor.size(1)
+        # Flatten the tensor into a single dimension, so combine all queries of
+        # max_sequence_len into 1 query of
+        # size = number of queries * max_sequence_len.
+        # Also filter for any empty tensors.
+        encoded_tensor = cat(tuple(filter(lambda t: t.numel() > 0, encoded_tensor)))
+        # Divide the tensor into batch_sized separate sequences.
+        # Trim the tensor. Trim/get rid of the excess.
         # The code `seq_len * batch_size` represents the total number of
         # elements required for a perfect division into batches.
-        batch_size = min(self.batch_size, encoded_tensor.size(1))
-        total_number_of_elements = sequence_len * batch_size
+        batch_size = min(total_batch_size, self.batch_size)
+        total_number_of_elements = sequence_len * min(total_batch_size, batch_size)
         encoded_tensor = encoded_tensor[:total_number_of_elements]
         self.logger.debug(
-            f"Unbatched tensors: {encoded_tensor}\nwith shape: {encoded_tensor.shape}"
+            f"Flattened filtered unbatched tensors:\n{encoded_tensor}\nwith shape: {encoded_tensor.shape}\ntotal number of elements: {total_number_of_elements}"
         )
         # Reshape the tensors into a 2D Tensor (batch_size, sequence_len).
         encoded_tensor = encoded_tensor.view(batch_size, sequence_len)
@@ -126,9 +127,9 @@ class DataLoader:
     ) -> tuple[Tensor, Tensor]:
         seq_len = input_tensor.size(0)
         data = input_tensor[idx : idx + seq_len]
-        target = torch_empty_tensor((seq_len, self.batch_size))
-        if train:
-            target = input_tensor[idx + 1 : idx + seq_len + 1].reshape(-1)
+        # target = torch_empty_tensor((seq_len, self.batch_size))
+        # if train:
+        target = input_tensor[idx + 1 : idx + seq_len + 1].reshape(-1)
         return data, target
 
     def tokenizer_encode(self, decoded_queries: list[str]) -> list[list[int]]:

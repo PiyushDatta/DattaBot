@@ -1,4 +1,3 @@
-import torch
 from torch import Tensor
 from sentencepiece import SentencePieceProcessor
 from os.path import isfile
@@ -14,9 +13,9 @@ from src.util import TOKENIZER_MODEL_PATH
 
 class Agent:
     def __init__(self) -> None:
-        # Setup logger and config, both singletons.
-        self.logger = get_logger()
+        # Setup config and logger, both singletons.
         self.config = get_agent_config()
+        self.logger = get_logger(logging_level=self.config.env.logging_level)
         # Setup tokenizer.
         assert isfile(TOKENIZER_MODEL_PATH), TOKENIZER_MODEL_PATH
         self.tokenizer: SentencePieceProcessor = SentencePieceProcessor(
@@ -41,6 +40,9 @@ class Agent:
         # Encode the list of queries and convert them into a tensors.
         # Tensor, int
         input_tensor, total_batches = self.convert_queries_to_tensors(queries=queries)
+        self.logger.debug(
+            f"Output of self.convert_queries_to_tensors():\n{input_tensor}\nwith shape: {input_tensor.shape}\nTotal batches: {total_batches}"
+        )
         # Feed the tensors to our model, in batches.
         batched_tensor_responses = []
         total_loss = 0
@@ -49,8 +51,8 @@ class Agent:
                 input_tensor=input_tensor, idx=i, train=False
             )
             # Call our model.
-            self.logger.info(
-                f"Data being fed to model: {data}. With shape: {data.shape}"
+            self.logger.debug(
+                f"Data being fed to model:\n{data}\nwith shape: {data.shape}"
             )
             output = self.model(data)
             # Flatten and add to our responses.

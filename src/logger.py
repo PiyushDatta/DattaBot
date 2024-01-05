@@ -2,15 +2,19 @@ import logging
 from src.util import Singleton
 
 
-def get_logger() -> logging.Logger:
-    return DattaBotLogger.__call__().get_logger()
+def get_logger(logging_level: str = "INFO") -> logging.Logger:
+    return DattaBotLogger.__call__().get_logger(
+        logging_level=logging.getLevelNamesMapping()[logging_level]
+    )
 
 
 class DattaBotLogger(object, metaclass=Singleton):
     _logger = None
 
     def __init__(
-        self, logging_level: int = logging.INFO, logging_file_name: str = "dattabot.log"
+        self,
+        logging_level: int = logging.INFO,
+        logging_file_name: str = "dattabot.log",
     ) -> None:
         """
         CRITICAL = 50
@@ -39,5 +43,7 @@ class DattaBotLogger(object, metaclass=Singleton):
         self._logger.addHandler(file_handler)
         self._logger.addHandler(console_handler)
 
-    def get_logger(self):
+    def get_logger(self, logging_level: int = None):
+        if logging_level is not None:
+            self._logger.setLevel(logging_level)
         return self._logger
