@@ -1,1 +1,2 @@
-python client.py
+#!/bin/bash
+python run.py "$@"

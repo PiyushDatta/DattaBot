@@ -1,10 +1,14 @@
 neural_net:
     n_layers: 6
     n_heads: 8
-    model_dimensions: 512
+    model_dimensions: 20
+    # model_dimensions: 512
     hidden_layers: 2048
     zeroed_drop_probability: 0.1
 agent:
+    max_tokens: 4096
+    input_block_size: 256
+    batch_size: 64
     max_grad_norm: 100
     gamma: 0.99
     tau: 0.005

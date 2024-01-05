@@ -1,1 +1,2 @@
-python client.py
+@echo off
+python run.py %*

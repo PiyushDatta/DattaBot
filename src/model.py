@@ -28,14 +28,19 @@ class DattaBotModel(nn.Module):
         self.n_layers = self.config.neural_net.n_layers
         self.n_heads = self.config.neural_net.n_heads
         self.model_dimensions = self.config.neural_net.model_dimensions
+        # Max tokens for response.
+        self.response_max_tokens = self.config.agent.max_tokens
+        self.logger.debug(f"Max tokens: {self.response_max_tokens}")
 
+        self.embedding = nn.Embedding(self.response_max_tokens, self.model_dimensions)
         self.encoder_stack = TransformerEncoderStack(
             n_layers=self.n_layers,
             n_heads=self.n_heads,
             model_dimensions=self.model_dimensions,
         )
 
-    def forward(self, src_input) -> Tensor:
+    def forward(self, src_input: Tensor) -> Tensor:
+        src_input = self.embedding(src_input) * math_sqrt(self.model_dimensions)
         encoder_stack_output = self.encoder_stack(src_input)
         return encoder_stack_output
 
@@ -94,9 +99,9 @@ class TransformerMultiHeadAttention(nn.Module):
         key = self.key_layer(input_key)
         value = self.value_layer(input_value)
         # Split tensors by number of heads.
-        query = self.split(query, self.n_heads)
-        key = self.split(key, self.n_heads)
-        value = self.split(value, self.n_heads)
+        query = self.split(query)
+        key = self.split(key)
+        value = self.split(value)
         # Call scaled dot-product attention layer.
         attention_score = self.attention_layer(
             query=query, key=key, value=value, mask=None
@@ -109,18 +114,18 @@ class TransformerMultiHeadAttention(nn.Module):
     def split(self, input_tensor: Tensor):
         self.logger.info(f"Splitting this tensor: {input_tensor}")
         self.logger.info(input_tensor.size())
-        batch_size, n_heads, length, model_dimensions = input_tensor.size()
-        model_depth = model_dimensions // n_heads
-        return tensor.view(batch_size, length, n_heads, model_depth).transpose(1, 2)
+        model_dimensions, batch_size = input_tensor.size()
+        model_depth = model_dimensions // self.n_heads
+        return input_tensor.view(model_depth, model_depth).transpose(1, 2)
 
     def concat(self, input_tensor: Tensor):
         """
         Opposite of split.
         """
-        batch_size, n_heads, length, model_depth = input_tensor.size()
-        model_dimensions = model_depth * n_heads
-        return tensor.transpose(1, 2).contiguous.view(
-            batch_size, length, n_heads, model_dimensions
+        batch_size, model_depth = input_tensor.size()
+        model_dimensions = model_depth * self.n_heads
+        return input_tensor.transpose(1, 2).contiguous.view(
+            batch_size, model_dimensions
         )
 
 
@@ -138,8 +143,8 @@ class TransformerScaledDotProductAttention(nn.Module):
         value: Tensor,
         mask: int = None,
     ) -> Tensor:
-        # Tensor input is 4D tensor.
-        _batch_size, _n_heads, _length, model_dimensions = key.size()
+        # Tensor input is 2D tensor.
+        _batch_size, model_dimensions = key.size()
         # Transpose keys. K^T.
         key = key.transpose(2, 3)
         # Get dot product of queries with all keys.

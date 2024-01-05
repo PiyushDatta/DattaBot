@@ -1,14 +1,15 @@
-import os
-from sentencepiece import SentencePieceProcessor
+import torch
 from torch import Tensor
-from src.util import (
-    TOKENIZER_MODEL_PATH,
-    convert_tensor_output_to_str,
-    make_tensor_from_input,
-)
+from sentencepiece import SentencePieceProcessor
+from os.path import isfile
+
 from src.logger import get_logger
 from src.agent_config import get_agent_config
+from src.logger import get_logger
+from src.agent_config import get_agent_config
+from src.data_loader import DataLoader
 from src.model import DattaBotModel
+from src.util import TOKENIZER_MODEL_PATH
 
 
 class Agent:
@@ -17,37 +18,55 @@ class Agent:
         self.logger = get_logger()
         self.config = get_agent_config()
         # Setup tokenizer.
-        assert os.path.isfile(TOKENIZER_MODEL_PATH), TOKENIZER_MODEL_PATH
-        self.tokenizer = SentencePieceProcessor(model_file=TOKENIZER_MODEL_PATH)
+        assert isfile(TOKENIZER_MODEL_PATH), TOKENIZER_MODEL_PATH
+        self.tokenizer: SentencePieceProcessor = SentencePieceProcessor(
+            model_file=TOKENIZER_MODEL_PATH
+        )
         self.logger.info(f"Loaded tokenizer model from path: {TOKENIZER_MODEL_PATH}")
-        self.vocab_size: int = self.tokenizer.vocab_size()
-        self.bos_id: int = self.tokenizer.bos_id()
-        self.eos_id: int = self.tokenizer.eos_id()
-        self.pad_id: int = self.tokenizer.pad_id()
-        self.logger.debug(f"Tokenizer Words: {self.vocab_size}")
-        self.logger.debug(f"Tokenizer BOS ID: {self.bos_id}")
-        self.logger.debug(f"Tokenizer EOS ID: {self.eos_id}")
+        # Setup data loader.
+        self.data_loader = DataLoader(tokenizer=self.tokenizer)
         # Setup model.
         self.model = DattaBotModel(tokenizer=self.tokenizer)
+        # Batch size.
+        self.batch_size = self.config.agent.batch_size
+        self.logger.debug(f"Batch size: {self.batch_size}")
+        # Model dimensions.
+        self.model_dimensions = self.config.neural_net.model_dimensions
+        self.logger.debug(f"Model dimensions: {self.model_dimensions}")
+        # Max tokens for response.
+        self.response_max_tokens = self.config.agent.max_tokens
+        self.logger.debug(f"Max tokens: {self.response_max_tokens}")
 
     def respond_to_queries(self, queries: list[str]) -> str:
-        # Encode the list of queries using the tokenizer.
-        encodings: list[list[int]] = self.tokenizer_encode(queries=queries)
-        self.logger.info(f"Encoded: {encodings}")
-        # Convert the query string to a Tensor and feed into our model.
-        encoded_tensor_input: Tensor = make_tensor_from_input(
-            src_input=encodings, config=self.config
+        # Encode the list of queries and convert them into a tensors.
+        # Tensor, int
+        input_tensor, total_batches = self.convert_queries_to_tensors(queries=queries)
+        # Feed the tensors to our model, in batches.
+        batched_tensor_responses = []
+        total_loss = 0
+        for batch, i in enumerate(range(0, total_batches)):
+            data, targets = self.data_loader.get_batch(
+                input_tensor=input_tensor, idx=i, train=False
+            )
+            # Call our model.
+            self.logger.info(
+                f"Data being fed to model: {data}. With shape: {data.shape}"
+            )
+            output = self.model(data)
+            # Flatten and add to our responses.
+            output_flat = output.view(-1, self.response_max_tokens)
+            batched_tensor_responses.append(output_flat)
+        # Decode the tensors and return the string reprensation of the
+        # agent's response.
+        return self.data_loader.convert_tensor_to_responses(
+            tensors=batched_tensor_responses
         )
-        self.logger.info(f"Encoded tensor inputs for the model: {encoded_tensor_input}")
-        encoded_tensor_output: Tensor = self.model(src_input=encoded_tensor_input)
-        # Convert the Tensor from the model to a output string.
-        output: str = convert_tensor_output_to_str(encoded_tensor_output)
-        self.logger.info(f"Model output: {output}")
-        # Return the output after decoding the output using the tokenizer.
-        return self.tokenizer_decode(encoded=output)
 
-    def tokenizer_encode(self, queries: list[str]) -> list[list[int]]:
-        return [self.tokenizer.encode(query) for query in queries]
+    def tokenizer_encode(self, decoded_queries: list[str]) -> list[list[int]]:
+        return self.data_loader.tokenizer_encode(decoded_queries=decoded_queries)
 
-    def tokenizer_decode(self, encoded: str) -> str:
-        return self.tokenizer.decode(encoded)
+    def tokenizer_decode(self, encoded_queries: list[list[int]]) -> list[str]:
+        return self.data_loader.tokenizer_decode(encoded_queries=encoded_queries)
+
+    def convert_queries_to_tensors(self, queries: list[str]) -> tuple[Tensor, int]:
+        return self.data_loader.convert_queries_to_tensors(queries=queries)

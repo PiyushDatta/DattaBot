@@ -16,7 +16,7 @@ class Singleton(type):
 def make_tensor_from_input(src_input: list[list[int]], config: DictConfig) -> Tensor:
     output_tensor = tensor(src_input, dtype=float64)
     model_dimensions = config.neural_net.model_dimensions
-    return output_tensor.expand((model_dimensions, model_dimensions))
+    return output_tensor.reshape(model_dimensions, model_dimensions)
 
 
 def convert_tensor_output_to_str(src_tensor: Tensor) -> str:
