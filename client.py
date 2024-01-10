@@ -19,16 +19,19 @@ class DattaCommandLineClient:
             try:
                 # Get input from the user
                 first_input = input("Enter text: ")
-                second_input = input("Enter text: ")
+                # second_input = input("Enter text: ")
+                second_input = ""
+
                 user_input = first_input
                 # Check if the user wants to exit
                 if user_input.lower() == "exit":
                     self.logger.info("Exiting the session. Goodbye!")
                     break
                 # Process the input and get the output
-                output_text: str = self.process_input(
-                    first_input=first_input, second_input=second_input
-                )
+                # output_text: str = self.process_input(
+                #     first_input=first_input, second_input=second_input
+                # )
+                output_text = "Model undergoing revision. Please come back later."
                 self.logger.info(output_text + "\n")
             except KeyboardInterrupt:
                 self.logger.info("KeyboardInterrupt. Exiting the session. Goodbye!")

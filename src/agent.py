@@ -56,13 +56,14 @@ class Agent:
             )
             output = self.model(data)
             # Flatten and add to our responses.
-            output_flat = output.view(-1, self.response_max_tokens)
-            batched_tensor_responses.append(output_flat)
+            # output_flat = output.view(-1, self.response_max_tokens)
+            batched_tensor_responses.append(str(output))
         # Decode the tensors and return the string reprensation of the
         # agent's response.
-        return self.data_loader.convert_tensor_to_responses(
-            tensors=batched_tensor_responses
-        )
+        return batched_tensor_responses
+        # return self.data_loader.convert_tensor_to_responses(
+        #     tensors=batched_tensor_responses
+        # )
 
     def tokenizer_encode(self, decoded_queries: list[str]) -> list[list[int]]:
         return self.data_loader.tokenizer_encode(decoded_queries=decoded_queries)
