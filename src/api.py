@@ -2,7 +2,7 @@ from enum import IntEnum
 from traceback import print_exception
 from src.agent import Agent as DattaBotAgent
 from src.logger import get_logger
-from src.agent import Tensor
+from src.util import DattaBotAPIResponse
 
 
 class AgentAction(IntEnum):
@@ -19,61 +19,6 @@ class AgentAction(IntEnum):
 class DattaBotAPIException(Exception):
     "Raised when the DattaBot API has an error."
     pass
-
-
-class DattaBotAPIResponse:
-    def __init__(self) -> None:
-        # The response to the request queries in a string human read-able form.
-        # Usually human language words.
-        self._query_response: str = ""
-        # The response to the queries in a Tensor form.
-        self._tensor_response: Tensor = None
-        # The number of batches used.
-        self._num_batches: int = None
-        # Tokenizer encodings of the request queries.
-        self._tokenizer_encodings: list[list[int]] = []
-        # Tokenizer decodings of the request queries.
-        self._tokenizer_decodings: list[str] = []
-
-    @property
-    def query_response(self) -> str:
-        return self._query_response
-
-    @query_response.setter
-    def query_response(self, value: str) -> None:
-        self._query_response = value
-
-    @property
-    def tensor_response(self) -> Tensor:
-        return self._tensor_response
-
-    @tensor_response.setter
-    def tensor_response(self, value: Tensor) -> None:
-        self._tensor_response = value
-
-    @property
-    def num_batches(self) -> int:
-        return self._num_batches
-
-    @num_batches.setter
-    def num_batches(self, value: int) -> None:
-        self._num_batches = value
-
-    @property
-    def tokenizer_encodings(self) -> list[list[int]]:
-        return self._tokenizer_encodings
-
-    @tokenizer_encodings.setter
-    def tokenizer_encodings(self, value: list[list[int]]) -> None:
-        self._tokenizer_encodings = value
-
-    @property
-    def tokenizer_decodings(self) -> list[str]:
-        return self._tokenizer_decodings
-
-    @tokenizer_decodings.setter
-    def tokenizer_decodings(self, value: list[str]) -> None:
-        self._tokenizer_decodings = value
 
 
 class DattaBotAPI:
@@ -106,7 +51,7 @@ class DattaBotAPI:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
         try:
             if action_type == AgentAction.GET_RESPONSES_FOR_QUERIES:
-                response.query_response = self.agent.respond_to_queries(queries=queries)
+                response = self.agent.respond_to_queries(queries=queries)
             elif action_type == AgentAction.GET_ENCODINGS_FOR_QUERIES:
                 response.tokenizer_encodings = self.agent.tokenizer_encode(
                     decoded_queries=queries

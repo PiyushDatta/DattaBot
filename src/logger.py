@@ -3,9 +3,9 @@ from src.util import Singleton
 
 
 def get_logger(logging_level: str = "INFO") -> logging.Logger:
-    return DattaBotLogger.__call__().get_logger(
+    return DattaBotLogger.__call__(
         logging_level=logging.getLevelNamesMapping()[logging_level]
-    )
+    ).get_logger(logging_level=logging.getLevelNamesMapping()[logging_level])
 
 
 class DattaBotLogger(object, metaclass=Singleton):
@@ -42,6 +42,9 @@ class DattaBotLogger(object, metaclass=Singleton):
         # Attach the handlers to the logger
         self._logger.addHandler(file_handler)
         self._logger.addHandler(console_handler)
+        self._logger.info(
+            f"Logging level being used: {logging.getLevelName(logging_level)}"
+        )
 
     def get_logger(self, logging_level: int = None):
         if logging_level is not None:

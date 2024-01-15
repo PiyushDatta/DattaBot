@@ -5,7 +5,7 @@ neural_net:
     hidden_layers: 2048
     zeroed_drop_probability: 0.1
 agent:
-    max_tokens: 4096
+    max_response_tokens: 512
     input_block_size: 256
     batch_size: 64
     max_grad_norm: 100
@@ -28,3 +28,4 @@ env:
     plot_validation: false
     validating_episodes: 100
     logging_level: "INFO"
+    tensor_dtype: "int32"

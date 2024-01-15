@@ -5,9 +5,12 @@ import sys
 
 sys.path.append("../dattabot")
 
-from src.api import DattaBotAPI, DattaBotAPIException, DattaBotAPIResponse, Tensor
+from src.util import Tensor
+from src.api import DattaBotAPI, DattaBotAPIException, DattaBotAPIResponse
 from src.agent_config import get_agent_config
+from src.logger import get_logger
 
+logger = get_logger()
 config = get_agent_config()
 datta_bot_api = DattaBotAPI()
 
@@ -38,6 +41,10 @@ class TestDattaBotAPI(unittest.TestCase):
     def test_respond_to_queries(self):
         three_queries = ["Hello!", "We've met already.", "Okay, nice to meet again."]
         resp: DattaBotAPIResponse = datta_bot_api.respond_to_queries(three_queries)
+        logger.debug("Debug printing for test: test_respond_to_queries")
+        logger.debug(f"Query response:\n{resp.query_response}")
+        logger.debug(f"Query tensor response:\n{resp.tensor_response}")
+        logger.debug(f"Query tensor response shape:\n{resp.tensor_response.shape}")
         self.assertIsNotNone(resp)
 
     # TODO(PiyushDatta): Get this test working.
