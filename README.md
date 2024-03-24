@@ -2,6 +2,18 @@
 
 A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try other approaches, like doing it in rust, if it serves value.
 
+# How to install and setup
+
+1. Setup a virtual environment
+    - `python3.10 -m venv <directory>`
+    - example: `python3.10 -m venv dattabot_venv`
+2. Activate the virtual environment
+    - Windows cmd: `dattabot_venv\Scripts\activate.bat`
+    - Windows powershell: `dattabot_venv\Scripts\Activate.ps1`
+    - Linux/Mac/Other: `source dattabot_venv/bin/activate`
+3. Pip install all dependencies
+    - `pip install -r requirements.txt`
+
 # How to interact with bot (run either of them) via client
 
 For windows:

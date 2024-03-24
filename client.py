@@ -19,13 +19,13 @@ class DattaCommandLineClient:
                 user_input = input("Enter text: ")
                 # Check if the user wants to exit
                 if user_input.lower() == "exit":
-                    self.logger.info("Exiting the session. Goodbye!")
+                    self.logger.info("Exiting the session. Goodbye!\n")
                     break
                 # Process the input and get the output
                 output_text: str = self.process_input(input_queries=[user_input])
                 self.logger.info(f"Response:\n{output_text}")
             except KeyboardInterrupt:
-                self.logger.info("KeyboardInterrupt. Exiting the session. Goodbye!")
+                self.logger.info("KeyboardInterrupt. Exiting the session. Goodbye!\n")
                 break
 
 

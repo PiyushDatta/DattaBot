@@ -4,8 +4,8 @@ from src.util import Singleton
 
 def get_logger(logging_level: str = "INFO") -> logging.Logger:
     return DattaBotLogger.__call__(
-        logging_level=logging.getLevelNamesMapping()[logging_level]
-    ).get_logger(logging_level=logging.getLevelNamesMapping()[logging_level])
+        logging_level=logging.getLevelName(logging_level)
+    ).get_logger(logging_level=logging.getLevelName(logging_level))
 
 
 class DattaBotLogger(object, metaclass=Singleton):
