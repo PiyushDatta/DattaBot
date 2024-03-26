@@ -164,3 +164,7 @@ class DataLoader:
 
     def tokenizer_decode(self, encoded_queries: list[list[int]]) -> list[str]:
         return [self.tokenizer.decode(query) for query in encoded_queries]
+
+    # TODO
+    def get_formatted_batched_training_data():
+        pass

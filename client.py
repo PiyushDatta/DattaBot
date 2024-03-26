@@ -8,7 +8,7 @@ class DattaCommandLineClient:
         self.api = DattaBotAPI()
         self.logger.info("Interactive CLI Session. Type 'exit' to end the session.\n")
 
-    def process_input(self, input_queries: [str]) -> str:
+    def process_input(self, input_queries: list[str]) -> str:
         resp: DattaBotAPIResponse = self.api.respond_to_queries(queries=input_queries)
         return resp.query_response
 

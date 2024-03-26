@@ -40,6 +40,22 @@ For linux/mac:
 Run python api test file:
 `python tests/test_api.py`
 
+# How to test api
+
+`python .\api_example.py --help`
+
+Examples:
+
+-   `python api_example.py --api_cmd "get_encoding" --api_args "hi there"`
+-   `python api_example.py --api_cmd "respond_to_queries" --api_args "hello there"`
+-   `python api_example.py --api_cmd "train_agent"`
+
+# Dependencies
+
+-   Python version: `3.10`
+-   Python packages: `requirements.txt`
+    -   `pip install -r requirements.txt`
+
 # Motivation
 
 -   Have fun learning more about AI

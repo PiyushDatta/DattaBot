@@ -48,6 +48,13 @@ class Agent:
         self.response_max_response_tokens = self.config.agent.max_response_tokens
         self.logger.debug(f"Max tokens: {self.response_max_response_tokens}")
 
+    def train_agent(self) -> DattaBotAPIResponse:
+        self.model.train()
+        epoch_loss = 0
+        response: DattaBotAPIResponse = DattaBotAPIResponse()
+        response.query_response = "TODO(PIYUSHDATTA): Fix me. Training agent."
+        return response
+
     def respond_to_queries(self, queries: list[str]) -> DattaBotAPIResponse:
         # Encode the list of queries and convert them into a tensors.
         # Tensor, int

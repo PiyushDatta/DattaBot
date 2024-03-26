@@ -12,8 +12,9 @@ class AgentAction(IntEnum):
     GET_ENCODINGS_FOR_QUERIES = 2
     GET_DECODINGS_FOR_QUERIES = 3
     GET_ENCODED_TENSORS_FOR_QUERIES = 4
+    TRAIN_AGENT = 5
     # Always keep this as last in enum.
-    NO_ACTION_END = 4
+    NO_ACTION_END = 6
 
 
 class DattaBotAPIException(Exception):
@@ -45,30 +46,36 @@ class DattaBotAPI:
             queries=queries, action_type=AgentAction.GET_ENCODED_TENSORS_FOR_QUERIES
         )
 
+    def train_agent(self) -> DattaBotAPIResponse:
+        return self._get_agent_action(queries=[], action_type=AgentAction.TRAIN_AGENT)
+
     def _get_agent_action(
         self, queries: list[str], action_type: AgentAction
     ) -> DattaBotAPIResponse:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
         try:
-            if action_type == AgentAction.GET_RESPONSES_FOR_QUERIES:
-                response = self.agent.respond_to_queries(queries=queries)
-            elif action_type == AgentAction.GET_ENCODINGS_FOR_QUERIES:
-                response.tokenizer_encodings = self.agent.tokenizer_encode(
-                    decoded_queries=queries
-                )
-            elif action_type == AgentAction.GET_DECODINGS_FOR_QUERIES:
-                response.tokenizer_decodings = self.agent.tokenizer_decode(
-                    encoded_queries=queries
-                )
-            elif action_type == AgentAction.GET_ENCODED_TENSORS_FOR_QUERIES:
-                (
-                    # Tensor
-                    response.tensor_response,
-                    # int
-                    response.num_batches,
-                ) = self.agent.convert_queries_to_tensors(queries=queries)
-            else:
-                raise DattaBotAPIException("Incorrect agent action requested.")
+            match action_type:
+                case AgentAction.GET_RESPONSES_FOR_QUERIES:
+                    response = self.agent.respond_to_queries(queries=queries)
+                case AgentAction.GET_ENCODINGS_FOR_QUERIES:
+                    response.tokenizer_encodings = self.agent.tokenizer_encode(
+                        decoded_queries=queries
+                    )
+                case AgentAction.GET_DECODINGS_FOR_QUERIES:
+                    response.tokenizer_decodings = self.agent.tokenizer_decode(
+                        encoded_queries=queries
+                    )
+                case AgentAction.GET_ENCODED_TENSORS_FOR_QUERIES:
+                    (
+                        # Tensor
+                        response.tensor_response,
+                        # int
+                        response.num_batches,
+                    ) = self.agent.convert_queries_to_tensors(queries=queries)
+                case AgentAction.TRAIN_AGENT:
+                    response = self.agent.train_agent()
+                case _:
+                    raise DattaBotAPIException("Incorrect agent action requested.")
         except Exception as err:
             _logger = get_logger()
             _logger.error(f"Traceback: {print_exception(err)}")
