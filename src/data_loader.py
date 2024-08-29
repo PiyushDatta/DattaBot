@@ -1,10 +1,7 @@
-from torch import (
-    tensor,
-    Tensor,
-    nn,
-    cat,
-    dtype as torch_dtype,
-)
+import os
+import urllib.request
+from torch import tensor, Tensor, nn, cat, dtype as torch_dtype, Generator
+from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer
 from src.agent_config import get_agent_config
@@ -12,10 +9,62 @@ from src.logger import get_logger
 from src.util import DattaBotAPIResponse, get_tensor_dtype_from_config
 
 
-class DataLoader:
+class DattaBotDataset(Dataset):
+    def __init__(
+        self, raw_txt_data: str, tokenizer: AutoTokenizer, max_seq_len: int, stride: int
+    ) -> None:
+        self.config = get_agent_config()
+        self.device = self.config.env.device
+        self.input_train_ids = []
+        self.target_train_ids = []
+        # Step - Tokenize the input
+        # self.token_ids = self.tokenizer.encode(text_data, allowed_special={"<|endoftext|>"})
+        encodings = tokenizer.encode_plus(
+            raw_txt_data,
+            add_special_tokens=True,
+            return_tensors=None,
+        )
+        self.token_ids = encodings["input_ids"]
+        total_characters = len(raw_txt_data)
+        total_tokens = len(self.token_ids)
+        print("Characters:", total_characters)
+        print("Tokens:", total_tokens)
+        # train_ratio = 0.80
+        # split_idx = int(len(text_data)*train_ratio)
+        # train_data = text_data[:split_idx]
+        # val_data = text_data[split_idx:]
+
+        # Step - Batch the data input (inputs and targets).
+        # Break them up by max_sequence_len (how long we want each input/target text to be)
+        for idx in range(0, len(self.token_ids) - max_seq_len, stride):
+            # For target chunk we just shift everything to the left by 1.
+            # Example:
+            # input = ["test1", "test2", "test3"]
+            # target = ["test2", "test3"]
+            #
+            # We shift because we want the model to guess the next work in the text.
+            # The next word is just the input text shifted by 1 (to the left).
+            # From our example, "test2" is the next word after "test1".
+            # So for idx = 0, input = "test1" and the model will guess
+            # what the next work is, and we compare the model output to the target.
+            # The target in this case is "test2" which is the correct answer.
+            input_chunk = self.token_ids[idx : idx + max_seq_len]
+            target_chunk = self.token_ids[idx + 1 : idx + max_seq_len + 1]
+            self.input_train_ids.append(tensor(input_chunk).to(self.device))
+            self.target_train_ids.append(tensor(target_chunk).to(self.device))
+
+    def __len__(self) -> int:
+        return len(self.input_train_ids)
+
+    def __getitem__(self, idx: int) -> tuple[list[str], list[str]]:
+        return self.input_train_ids[idx], self.target_train_ids[idx]
+
+
+class DattaBotDataLoader:
     def __init__(self, tokenizer: AutoTokenizer) -> None:
         # Setup config and logger, both singletons.
         self.config = get_agent_config()
+        self.device = self.config.env.device
         self.logger = get_logger(logging_level=self.config.env.logging_level)
         self.logger.debug(f"{self.__class__.__name__} init.")
         self._tensor_dtype = get_tensor_dtype_from_config(config=self.config)
@@ -143,16 +192,6 @@ class DataLoader:
         response.query_response = " ".join(decoded_responses)
         return response
 
-    def get_batch(
-        self, input_tensor: Tensor, idx: int, train: bool
-    ) -> tuple[Tensor, Tensor]:
-        seq_len = input_tensor.size(0)
-        data = input_tensor[idx : idx + seq_len]
-        # target = torch_empty_tensor((seq_len, self.batch_size))
-        # if train:
-        target = input_tensor[idx + 1 : idx + seq_len + 1].reshape(-1)
-        return data, target
-
     def tokenizer_encode(self, decoded_queries: list[str]) -> list[list[int]]:
         return [
             self.tokenizer.encode_plus(
@@ -165,6 +204,28 @@ class DataLoader:
     def tokenizer_decode(self, encoded_queries: list[list[int]]) -> list[str]:
         return [self.tokenizer.decode(query) for query in encoded_queries]
 
-    # TODO
-    def get_formatted_batched_training_data():
-        pass
+    def get_formatted_batched_training_data(self) -> DataLoader:
+        # Grab the raw data we want.
+        file_path = "the-verdict.txt"
+        # Source: https://github.com/rasbt/LLMs-from-scratch/blob/main/ch02/01_main-chapter-code/ch02.ipynb
+        if not os.path.exists(file_path):
+            url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt"
+            urllib.request.urlretrieve(url, file_path)
+        with open(file_path, "r", encoding="utf-8") as file:
+            txt_data = file.read()
+        # Get the dataset.
+        dataset = DattaBotDataset(
+            raw_txt_data=txt_data,
+            tokenizer=self.tokenizer,
+            max_seq_len=self.max_sequence_len,
+            stride=self.max_sequence_len,
+        )
+        # Return torch DataLoader
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=0,
+            generator=Generator(device=self.device),
+        )

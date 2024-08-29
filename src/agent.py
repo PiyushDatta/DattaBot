@@ -1,12 +1,13 @@
-from torch import Tensor, nn
+from torch import Tensor, nn, no_grad as torch_no_grad, optim
+from torch.utils.data import DataLoader as TorchDataLoader
 from transformers import AutoTokenizer
-from os.path import isfile
 
 from src.logger import get_logger
 from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.agent_config import get_agent_config
-from src.data_loader import DataLoader
+from src.data_loader import DattaBotDataLoader
+from src.data_loader import DattaBotDataset as DataSet
 from src.model import DattaBotModel
 from src.util import DattaBotAPIResponse, get_tensor_dtype_from_config
 
@@ -35,7 +36,7 @@ class Agent:
         assert self.tokenizer.pad_token_id != -1, f"Pad id can't be -1."
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
         # Setup data loader.
-        self.data_loader = DataLoader(tokenizer=self.tokenizer)
+        self.data_loader = DattaBotDataLoader(tokenizer=self.tokenizer)
         # Setup model.
         self.model = DattaBotModel(tokenizer=self.tokenizer)
         # Batch size.
@@ -47,12 +48,88 @@ class Agent:
         # Max tokens for response.
         self.response_max_response_tokens = self.config.agent.max_response_tokens
         self.logger.debug(f"Max tokens: {self.response_max_response_tokens}")
+        # Max epochs.
+        self.max_epoch = self.config.agent.max_epoch
+        # Learning rate.
+        self.learning_rate = self.config.agent.learning_rate
+        # Weight decay
+        self.weight_decay = self.config.agent.weight_decay
+        # Device (cpu or gpu)
+        self.device = self.config.env.device
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+        )
+
+    def calc_loss_batch(self, input_batch, target_batch):
+        input_batch, target_batch = input_batch.to(self.device), target_batch.to(
+            self.device
+        )
+        logits = self.model(src_input=input_batch, src_mask=None)
+        loss = nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+        return loss
+
+    def calc_loss_loader(self, data_loader: TorchDataLoader, num_batches=None):
+        total_loss = 0.0
+        if len(data_loader) == 0:
+            return float("nan")
+        elif num_batches is None:
+            num_batches = len(data_loader)
+        else:
+            num_batches = min(num_batches, len(data_loader))
+        for i, (input_batch, target_batch) in enumerate(data_loader):
+            if i < num_batches:
+                loss = self.calc_loss_batch(input_batch, target_batch)
+                total_loss += loss.item()
+            else:
+                break
+        return total_loss / num_batches
+
+    def evaluate_model(self, data_loader: TorchDataLoader, eval_iter):
+        self.model.eval()
+        with torch_no_grad():
+            train_loss = self.calc_loss_loader(
+                data_loader=data_loader, num_batches=eval_iter
+            )
+            # val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+        self.model.train()
+        return train_loss
+        # return train_loss, val_loss
 
     def train_agent(self) -> DattaBotAPIResponse:
+        self.logger.info("\nStarting training...")
         self.model.train()
         epoch_loss = 0
+        train_losses = []
+        tokens_seen = 0
+        global_step = -1
+        eval_iter = 10
+        eval_freq = 10
         response: DattaBotAPIResponse = DattaBotAPIResponse()
         response.query_response = "TODO(PIYUSHDATTA): Fix me. Training agent."
+        batched_train_data: TorchDataLoader = (
+            self.data_loader.get_formatted_batched_training_data()
+        )
+        self.model.train()
+        for epoch in range(self.max_epoch):
+            for input_data, target_data in batched_train_data:
+                self.optimizer.zero_grad()
+                loss = self.calc_loss_batch(input_data, target_data)
+                loss.backward()
+                self.optimizer.step()
+                global_step += 1
+                tokens_seen += input_data.numel()
+                if (global_step % eval_freq) == 0:
+                    train_loss = self.evaluate_model(
+                        data_loader=batched_train_data, eval_iter=eval_iter
+                    )
+                    train_losses.append(train_loss)
+                    print(
+                        f"Ep {epoch+1} (Step {global_step:06d}): "
+                        f"Train loss {train_loss:.3f}"
+                    )
+        self.logger.info("Finished training!\n")
         return response
 
     def respond_to_queries(self, queries: list[str]) -> DattaBotAPIResponse:

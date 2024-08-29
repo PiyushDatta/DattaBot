@@ -7,14 +7,16 @@ neural_net:
 agent:
     max_response_tokens: 512
     input_block_size: 256
-    batch_size: 64
+    batch_size: 4
     max_grad_norm: 100
     gamma: 0.99
     tau: 0.005
-    lr: 0.0001
+    learning_rate: 0.0001
     epsilon_start: 0.9
     epsilon_min: 0.05
     epsilon_decay: 1000
+    max_epoch: 100
+    weight_decay: 0.1
 env:
     env_name: "DattaBot"
     device: "cuda"
