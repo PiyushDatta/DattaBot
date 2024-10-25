@@ -38,7 +38,7 @@ class DattaBotAPIResponse:
         # The response to the queries in a Tensor form.
         self._tensor_response: Tensor = None
         # The number of batches used.
-        self._num_batches: int = None
+        self._num_batches: int = 0
         # Tokenizer encodings of the request queries.
         self._tokenizer_encodings: list[list[int]] = []
         # Tokenizer decodings of the request queries.

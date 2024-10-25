@@ -1,3 +1,8 @@
+import os
+import torch
+from datasets import load_dataset
+from torchtext.vocab import build_vocab_from_iterator
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset
 from torch import (
     tensor,
     Tensor,
@@ -6,6 +11,7 @@ from torch import (
     dtype as torch_dtype,
 )
 from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
 from transformers import AutoTokenizer
 from src.agent_config import get_agent_config
 from src.logger import get_logger
@@ -13,7 +19,7 @@ from src.util import DattaBotAPIResponse, get_tensor_dtype_from_config
 
 
 class DataLoader:
-    def __init__(self, tokenizer: AutoTokenizer) -> None:
+    def __init__(self, tokenizer: AutoTokenizer, data_dir: str = "./dattabot_data_dir") -> None:
         # Setup config and logger, both singletons.
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
@@ -39,6 +45,11 @@ class DataLoader:
         # Batch size
         self.batch_size = self.config.agent.batch_size
         self.logger.debug(f"Batch size: {self.batch_size}")
+        self.data_dir = data_dir
+        CurrentTorchTextDataset = "ag_news"
+        # self.dataset_cls = CurrentTorchTextDataset
+        # self.dataset_name = self.dataset_cls.__name__
+        self.dataset_name = CurrentTorchTextDataset
 
     @property
     def tensor_dtype(self) -> torch_dtype:
@@ -165,6 +176,169 @@ class DataLoader:
     def tokenizer_decode(self, encoded_queries: list[list[int]]) -> list[str]:
         return [self.tokenizer.decode(query) for query in encoded_queries]
 
-    # TODO
+    # Build vocabulary function with progress display
+    def build_vocab_with_progress(self, data_lst: list):
+        total_items = len(data_lst)
+
+        # Wrapper function to yield tokens with progress bar
+        def yield_tokens(data_lst):
+            for text in tqdm(
+                data_lst, desc="Tokenizing and building Vocabulary", total=total_items
+            ):
+                yield self.tokenizer.tokenize(text)
+
+        # Build vocabulary from token iterator
+        self.logger.info("Building the vocabulary...")
+        vocab = build_vocab_from_iterator(
+            yield_tokens(data_lst), specials=["<unk>", "<pad>"]
+        )
+        self.logger.info("Done building the vocabulary...")
+        vocab.set_default_index(vocab["<unk>"])
+        return vocab
+
+    def download_dataset(self):
+        """
+        Download and return the appropriate train and validation data
+        """
+        dataset = load_dataset(self.dataset_name)
+        return dataset["train"], dataset["test"]
+
+    def clean_dataset_entries(self, data_list):
+        """
+        Clean the dataset entries by removing class labels and keeping only the text content.
+        TODO(PiyushDatta): Currently this only works for ag_news dataset, make this work for everything.
+
+        Args:
+            data_list: List of tuples containing (label, text) pairs
+
+        Returns:
+            List of cleaned text strings
+        """
+        cleaned_data = []
+        for entry in data_list:
+            # Extract just the text content (second element of the tuple)
+            text = entry["text"]
+            cleaned_data.append(text)
+
+        return cleaned_data
+
+    def setup_data(self):
+        """
+        Download and setup dataset if not already present
+        """
+        # Create data directory.
+        os.makedirs(self.data_dir, exist_ok=True)
+
+        # Define paths based on dataset name
+        train_file = os.path.join(self.data_dir, f"{self.dataset_name}_train.pt")
+        val_file = os.path.join(self.data_dir, f"{self.dataset_name}_val.pt")
+        vocab_file = os.path.join(self.data_dir, f"{self.dataset_name}_vocab.pt")
+        raw_train_path = os.path.join(
+            self.data_dir, f"{self.dataset_name}_train_raw.pt"
+        )
+        raw_val_path = os.path.join(self.data_dir, f"{self.dataset_name}_val_raw.pt")
+
+        # Try to load cached data
+        try:
+            if os.path.exists(train_file):
+                self.logger.debug("Loading cached dataset...")
+                train_data = torch.load(train_file)
+                val_data = torch.load(val_file)
+                vocab = torch.load(vocab_file)
+            else:
+                # Check if raw data exists; if not, download and save it
+                if os.path.exists(raw_train_path) and os.path.exists(raw_val_path):
+                    self.logger.info("Loading raw data from cached files...")
+                    train_data = torch.load(raw_train_path)
+                    val_data = torch.load(raw_val_path)
+                else:
+                    self.logger.info(f"Downloading {self.dataset_name} dataset...")
+                    train_iter, val_iter = self.download_dataset()
+                    # Convert train_iter and val_iter to lists and save the raw data
+                    train_data = list(train_iter)
+                    val_data = list(val_iter)
+                    # Clean the data.
+                    train_data = self.clean_dataset_entries(train_data)
+                    val_data = self.clean_dataset_entries(val_data)
+                    torch.save(train_data, raw_train_path)
+                    torch.save(val_data, raw_val_path)
+                    self.logger.info("Raw data saved successfully.")
+                    self.logger.info(
+                        f"Finished downloading {self.dataset_name} dataset!"
+                    )
+                # Build vocabulary with progress tracking.
+                self.logger.info(
+                    f"Start building vocab from {self.dataset_name} dataset..."
+                )
+                vocab = self.build_vocab_with_progress(train_data)
+                self.logger.info(
+                    f"Done building vocab from {self.dataset_name} dataset!"
+                )
+                # Cache the processed data
+                torch.save(train_data, train_file)
+                torch.save(val_data, val_file)
+                torch.save(vocab, vocab_file)
+
+            # Create datasets
+            seq_len = self.config.agent.max_response_tokens
+            train_dataset = TextDataset(train_data, self.tokenizer, vocab, seq_len)
+            val_dataset = TextDataset(val_data, self.tokenizer, vocab, seq_len)
+
+            # Create dataloaders
+            train_dataloader = TorchDataLoader(
+                train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=4,
+                generator=torch.Generator(device=self.config.env.device),
+            )
+            val_dataloader = TorchDataLoader(
+                val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=4,
+                generator=torch.Generator(device=self.config.env.device),
+            )
+
+            return train_dataloader, val_dataloader, vocab
+
+        except Exception as e:
+            self.logger.error(f"Error setting up data: {str(e)}")
+            raise
+
+    # TODO(PiyushDatta): Fix me.
     def get_formatted_batched_training_data():
         pass
+
+
+class TextDataset(Dataset):
+    def __init__(
+        self, data: list[str], tokenizer: AutoTokenizer, vocab, seq_length: int = 256
+    ):
+        self.data = data
+        self.vocab = vocab
+        self.seq_length = seq_length
+        self.tokenizer = tokenizer
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # Get text and tokenize
+        text = self.data[idx]
+        tokens = self.tokenizer(text)
+
+        # Convert to indices and ensure length
+        indices = [self.vocab[token] for token in tokens]
+        if len(indices) >= self.seq_length + 1:
+            indices = indices[: self.seq_length + 1]
+        else:
+            indices = indices + [self.vocab["<pad>"]] * (
+                self.seq_length + 1 - len(indices)
+            )
+
+        # Create input and target sequences
+        x = torch.tensor(indices[:-1], dtype=torch.long)
+        y = torch.tensor(indices[1:], dtype=torch.long)
+
+        return x, y
