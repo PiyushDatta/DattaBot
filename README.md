@@ -72,7 +72,7 @@ Examples:
 
 # License
 
-**The Unlicense**
+**The MIT License**
 
 -   Permissions (you are authorized to):
 
