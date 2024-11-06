@@ -8,7 +8,6 @@ from torch import (
     cos,
     Tensor,
     set_default_device as torch_set_default_device,
-    set_default_dtype as torch_set_default_dtype,
 )
 from numpy import sqrt as np_sqrt
 from transformers import AutoTokenizer
@@ -27,6 +26,7 @@ class DattaBotModel(nn.Module):
         #                    only float types are supported.
         torch_set_default_device(self.device)
         # Assumes tokenizer is already setup.
+        assert tokenizer is not None
         self.tokenizer = tokenizer
         self.vocab_size = self.tokenizer.vocab_size
         self.n_layers = self.config.neural_net.n_layers
@@ -41,19 +41,35 @@ class DattaBotModel(nn.Module):
             model_embedding_dims=self.model_dimensions,
             tokenizer=tokenizer,
         )
+        self.decoder_stack = TransformerDecoderStack(
+            n_layers=self.n_layers,
+            n_heads=self.n_heads,
+            model_embedding_dims=self.model_dimensions,
+            tokenizer=tokenizer,
+        )
+        # Output projection layer to convert to the words in our training set.
+        self.output_projection = nn.Linear(self.model_dimensions, self.vocab_size)
 
-    def forward(self, src_input: Tensor, src_mask: Tensor) -> Tensor:
+    def forward(
+        self, src_input: Tensor, src_mask: Tensor, tgt_input: Tensor, tgt_mask: Tensor
+    ) -> Tensor:
         self.logger.debug(
-            f"Model received the following tensor input: {src_input}, with shape: {src_input.shape}"
+            f"Model received the following tensor inputs:\n{src_input}, with shape: {src_input.shape}\n{tgt_input}, with shape: {tgt_input.shape}"
         )
         if src_mask is not None:
             self.logger.debug(
                 f"Model received the following tensor mask: {src_mask}, with shape: {src_mask.shape}"
             )
+        if tgt_mask is not None:
+            self.logger.debug(
+                f"Model received the following tensor mask: {tgt_mask}, with shape: {tgt_mask.shape}"
+            )
         encoder_stack_output = self.encoder_stack(
-            src_input=src_input, src_mask=src_mask
+            src_input=src_input,
+            src_mask=src_mask,
         )
-        return encoder_stack_output
+        # Return logits.
+        return self.output_projection(encoder_stack_output)
 
 
 class TransformerEncoderStack(nn.Module):
@@ -81,7 +97,7 @@ class TransformerEncoderStack(nn.Module):
         # Multiple attention layers.
         self.layers = nn.ModuleList(
             [
-                TransformerBlock(
+                TransformerEncoderBlock(
                     tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
                 )
                 for _ in range(self.n_layers)
@@ -94,6 +110,131 @@ class TransformerEncoderStack(nn.Module):
         for layer in self.layers:
             output = layer(src_input=output, src_mask=src_mask)
         return output
+
+
+class TransformerDecoderStack(nn.Module):
+    def __init__(
+        self,
+        n_layers: int,
+        n_heads: int,
+        model_embedding_dims: int,
+        tokenizer: AutoTokenizer,
+    ) -> None:
+        super().__init__()
+        self.config = get_agent_config()
+        self.logger = get_logger(logging_level=self.config.env.logging_level)
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.model_embedding_dims = model_embedding_dims
+        # Embedding layer.
+        self.embedding_layer = TransformerEmbedding(
+            tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
+        )
+        # Positional Embedding.
+        self.positional_encoding = TransformerPositionalEncoding(
+            embedded_dim_size=self.model_embedding_dims
+        )
+        # Multiple attention layers.
+        self.layers = nn.ModuleList(
+            [
+                TransformerDecoderBlock(
+                    tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
+                )
+                for _ in range(self.n_layers)
+            ]
+        )
+
+    def forward(self, tgt_input: Tensor, src_mask: Tensor, tgt_mask: Tensor) -> Tensor:
+        output = self.embedding_layer(tgt_input)
+        output = self.positional_encoding(output)
+        for layer in self.layers:
+            output = layer(src_input=output, src_mask=src_mask)
+        return output
+
+
+class TransformerEncoderBlock(nn.Module):
+    def __init__(
+        self,
+        tokenizer: AutoTokenizer,
+        embedded_dim_size: int,
+    ) -> None:
+        super().__init__()
+        self.config = get_agent_config()
+        self.tokenizer = tokenizer
+        self.multi_head_attn = TransformerMultiHeadAttention(
+            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
+        )
+        self.multi_head_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+        self.position_wise_ffn = TransformerPositionWiseFeedForward()
+        self.position_wise_ffn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+
+    def forward(self, src_input: Tensor, src_mask: Tensor) -> Tensor:
+        output = src_input
+        # Query: seeks specific information in the input.
+        # Key: responds to these queries.
+        # Value: delivers the content we aim to focus on, based on the alignment
+        #        between Query and Key.
+        #
+        # Source: https://awadrahman.medium.com/from-theory-to-code-make-sense-of-transformers-in-machine-learning-51b8b23c34c5
+        output = output + self.multi_head_attn(
+            input_query=output, input_key=output, input_value=output, mask=src_mask
+        )
+        output = self.multi_head_attn_norm(output)
+        output = output + self.position_wise_ffn(output)
+        return self.position_wise_ffn_norm(output)
+
+
+class TransformerDecoderBlock(nn.Module):
+    def __init__(
+        self,
+        tokenizer: AutoTokenizer,
+        embedded_dim_size: int,
+    ) -> None:
+        super().__init__()
+        self.config = get_agent_config()
+        self.tokenizer = tokenizer
+        # Self attention.
+        self.multi_head_attn = TransformerMultiHeadAttention(
+            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
+        )
+        self.multi_head_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+        # Cross attention.
+        self.cross_attn = TransformerMultiHeadAttention(
+            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
+        )
+        self.cross_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+        # Feed forward.
+        self.position_wise_ffn = TransformerPositionWiseFeedForward()
+        self.position_wise_ffn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+
+    def forward(
+        self,
+        tgt_input: Tensor,
+        encoder_output: Tensor,
+        src_mask: Tensor,
+        tgt_mask: Tensor,
+    ) -> Tensor:
+        output = tgt_input
+        # Query: seeks specific information in the input.
+        # Key: responds to these queries.
+        # Value: delivers the content we aim to focus on, based on the alignment
+        #        between Query and Key.
+        #
+        # Source: https://awadrahman.medium.com/from-theory-to-code-make-sense-of-transformers-in-machine-learning-51b8b23c34c5
+        output = output + self.multi_head_attn(
+            input_query=output, input_key=output, input_value=output, mask=tgt_mask
+        )
+        output = self.multi_head_attn_norm(output)
+        output = output + self.cross_attention(
+            input_query=output,
+            input_key=encoder_output,
+            input_value=encoder_output,
+            mask=src_mask,
+        )
+        output = self.cross_attention_norm(output)
+        # Feed forward.
+        output = output + self.position_wise_ffn(output)
+        return self.position_wise_ffn_norm(output)
 
 
 class TransformerEmbedding(nn.Module):
@@ -157,38 +298,6 @@ class TransformerPositionWiseFeedForward(nn.Module):
         output = self.dropout_one(output)
         output = self.linear_two(output)
         return self.dropout_two(output)
-
-
-class TransformerBlock(nn.Module):
-    def __init__(
-        self,
-        tokenizer: AutoTokenizer,
-        embedded_dim_size: int,
-    ) -> None:
-        super().__init__()
-        self.config = get_agent_config()
-        self.tokenizer = tokenizer
-        self.multi_head_attn = TransformerMultiHeadAttention(
-            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
-        )
-        self.multi_head_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
-        self.position_wise_ffn = TransformerPositionWiseFeedForward()
-        self.position_wise_ffn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
-
-    def forward(self, src_input: Tensor, src_mask: Tensor) -> Tensor:
-        output = src_input
-        # Query: seeks specific information in the input.
-        # Key: responds to these queries.
-        # Value: delivers the content we aim to focus on, based on the alignment
-        #        between Query and Key.
-        #
-        # Source: https://awadrahman.medium.com/from-theory-to-code-make-sense-of-transformers-in-machine-learning-51b8b23c34c5
-        output = output + self.multi_head_attn(
-            input_query=output, input_key=output, input_value=output, mask=src_mask
-        )
-        output = self.multi_head_attn_norm(output)
-        output = output + self.position_wise_ffn(output)
-        return self.position_wise_ffn_norm(output)
 
 
 class TransformerMultiHeadAttention(nn.Module):

@@ -1,6 +1,10 @@
 from enum import Enum
+from src.api_interface import DattaBotAPIResponse
 from src.api import DattaBotAPI
 from argparse import ArgumentParser
+
+# Defines the delimiter to split the API args.
+DELIMITER = ","
 
 
 class APIActions(Enum):
@@ -23,7 +27,13 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
     print(f"API args: {api_args}")
     match api_cmd:
         case APIActions.RESPOND_TO_QUERIES.name:
-            print(api_client.respond_to_queries(queries=api_args))
+            queries = api_args.split(DELIMITER)
+            # Strip whitespace from each query.
+            queries = [query.strip() for query in queries]
+            responses: DattaBotAPIResponse = api_client.respond_to_queries(
+                queries=queries
+            )
+            print(responses)
         case APIActions.GET_ENCODING.name:
             print(api_client.get_encoding(queries=api_args))
         case APIActions.GET_DECODING.name:

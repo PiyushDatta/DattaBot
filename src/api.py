@@ -2,24 +2,7 @@ from enum import IntEnum
 from traceback import print_exception
 from src.agent import Agent as DattaBotAgent
 from src.logger import get_logger
-from src.util import DattaBotAPIResponse
-
-
-class AgentAction(IntEnum):
-    # Always keep this as first in enum.
-    NO_ACTION_START = 0
-    GET_RESPONSES_FOR_QUERIES = 1
-    GET_ENCODINGS_FOR_QUERIES = 2
-    GET_DECODINGS_FOR_QUERIES = 3
-    GET_ENCODED_TENSORS_FOR_QUERIES = 4
-    TRAIN_AGENT = 5
-    # Always keep this as last in enum.
-    NO_ACTION_END = 6
-
-
-class DattaBotAPIException(Exception):
-    "Raised when the DattaBot API has an error."
-    pass
+from src.api_interface import AgentAction, DattaBotAPIResponse, DattaBotAPIException
 
 
 class DattaBotAPI:
