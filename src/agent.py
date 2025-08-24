@@ -1,26 +1,28 @@
-import os
 import csv
+import os
 import time
 from typing import Dict, Optional
-import torch
-from torch import Tensor, nn
-import torch.cuda.amp as amp
-from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
-import tqdm
-from transformers import AutoTokenizer
+
 import matplotlib.pyplot as plt
-from torch.utils.tensorboard import SummaryWriter
+import torch
+import torch.cuda.amp as amp
+import torch.multiprocessing as mp
+import tqdm
+from src.agent_config import get_agent_config
+from src.api_interface import DattaBotAPIResponse
+from src.data_loader import DattabotDataBuilder, DattabotDataLoader
+
+# TODO(PiyushDatta): Get Shampoo optimizer to work.
+# from src.optim_shampoo import Shampoo
+from src.gpu_profiler import BackgroundGPUProfiler
 
 from src.logger import get_logger
-from src.agent_config import get_agent_config
-from src.logger import get_logger
-from src.agent_config import get_agent_config
-from src.data_loader import DattabotDataLoader, DattabotDataBuilder
 from src.model import DattaBotModel
-from src.api_interface import DattaBotAPIResponse
 from src.util import get_tensor_dtype_from_config
-from src.optim_shampoo import Shampoo
-from src.gpu_profiler import BackgroundGPUProfiler
+from torch import nn, Tensor
+from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
+from torch.utils.tensorboard import SummaryWriter
+from transformers import AutoTokenizer
 
 
 class Agent:
@@ -172,8 +174,9 @@ class Agent:
                 self.logger.info(
                     f"No model weights found, was looking to load weights from: {filepath}"
                 )
-                return
+                return {}
             # Load weights
+            self.logger.info(f"Model weights found at {filepath}, loading weights...")
             checkpoint = torch.load(filepath, map_location=self.agent_device)
             if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
                 # Load from structured checkpoint
@@ -205,6 +208,7 @@ class Agent:
         self.train_batch_idx = 0
         self.val_batch_idx = 0
         self.gpu_profiler.start()
+        mp.set_start_method("spawn", force=True)
 
     def end_training_session(self):
         self.train_batch_idx = 0
@@ -563,7 +567,7 @@ class Agent:
                     for _ in range(self.response_max_response_tokens):
                         # Tokenize the query.
                         src_input = self.tokenizer.encode(
-                            query, return_tensors="pt"
+                            query, padding=True, truncation=True, return_tensors="pt"
                         ).to(self.agent_device)
                         tgt_input = torch.tensor(
                             [[self.tokenizer.bos_token_id]], device=self.agent_device

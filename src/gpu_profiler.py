@@ -1,23 +1,23 @@
+import csv
+import json
+import queue
 import subprocess
 import threading
-import queue
 import time
-from dataclasses import dataclass
-from typing import Optional, Dict, List
-import torch
-import psutil
 from collections import deque
-import csv
-from pathlib import Path
-import json
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import psutil
+import torch
 
 
 @dataclass
 class GPUMetrics:
     memory_allocated: float  # In MB
     memory_reserved: float  # In MB
-    memory_cached: float  # In MB
     utilization: float  # In percentage
     temperature: Optional[float]  # In Celsius
     power_usage: Optional[float]  # In Watts
@@ -59,7 +59,6 @@ class BackgroundGPUProfiler:
                     "timestamp",
                     "memory_allocated_mb",
                     "memory_reserved_mb",
-                    "memory_cached_mb",
                     "gpu_utilization_percent",
                     "temperature_celsius",
                     "power_usage_watts",
@@ -75,7 +74,6 @@ class BackgroundGPUProfiler:
                 0,
                 0,
                 0,
-                0,
                 None,
                 None,
                 psutil.cpu_percent(),
@@ -88,7 +86,6 @@ class BackgroundGPUProfiler:
         # Memory metrics (convert to MB)
         memory_allocated = torch.cuda.memory_allocated(device_idx) / 1024**2
         memory_reserved = torch.cuda.memory_reserved(device_idx) / 1024**2
-        memory_cached = torch.cuda.memory_cached(device_idx) / 1024**2
         # Get utilization using nvidia-smi if available
         utilization = 0
         temperature = None
@@ -103,10 +100,14 @@ class BackgroundGPUProfiler:
             utilization_output = subprocess.check_output(
                 nvidia_smi_command, encoding="utf-8"
             )
-            utilization = float(
-                utilization_output.strip()
-            )  # Convert utilization to float
-            # Get GPU temperature and power usage (if available)
+            utilization_values = [
+                float(x) for x in utilization_output.strip().split("\n") if x
+            ]
+            utilization = (
+                sum(utilization_values) / len(utilization_values)
+                if utilization_values
+                else 0.0
+            )
             nvidia_smi_temp_command = [
                 "nvidia-smi",
                 "--query-gpu=temperature.gpu,power.draw",
@@ -114,8 +115,18 @@ class BackgroundGPUProfiler:
             ]
             temp_power_output = subprocess.check_output(
                 nvidia_smi_temp_command, encoding="utf-8"
-            ).strip()
-            temperature, power_usage = map(float, temp_power_output.split(","))
+            )
+            temp_power_lines = [
+                line.strip() for line in temp_power_output.strip().split("\n") if line
+            ]
+            temps = []
+            powers = []
+            for line in temp_power_lines:
+                temp_str, power_str = line.split(",")
+                temps.append(float(temp_str))
+                powers.append(float(power_str))
+            temperature = sum(temps) / len(temps) if temps else None
+            power_usage = sum(powers) / len(powers) if powers else None
         except subprocess.CalledProcessError:
             try:
                 if hasattr(torch.cuda, "utilization"):
@@ -130,7 +141,6 @@ class BackgroundGPUProfiler:
         return GPUMetrics(
             memory_allocated=memory_allocated,
             memory_reserved=memory_reserved,
-            memory_cached=memory_cached,
             utilization=utilization,
             temperature=temperature,
             power_usage=power_usage,
@@ -148,7 +158,6 @@ class BackgroundGPUProfiler:
                     metrics.timestamp,
                     metrics.memory_allocated,
                     metrics.memory_reserved,
-                    metrics.memory_cached,
                     metrics.utilization,
                     metrics.temperature,
                     metrics.power_usage,

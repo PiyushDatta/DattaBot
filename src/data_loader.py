@@ -1,24 +1,20 @@
-from enum import Enum
 import os
+import time
+from enum import Enum
 from typing import Any, Optional
+
 import torch
 from datasets import load_dataset
-from torchtext.vocab import build_vocab_from_iterator
-from torch.utils.data import DataLoader as TorchDataLoader, Dataset
-from torch import (
-    tensor,
-    Tensor,
-    nn,
-    cat,
-    dtype as torch_dtype,
-)
+from src.agent_config import get_agent_config
+from src.api_interface import DattaBotAPIResponse
+from src.logger import get_logger
+from src.util import get_tensor_dtype_from_config
+from torch import cat, dtype as torch_dtype, nn, tensor, Tensor
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset
+from torchtext.vocab import build_vocab_from_iterator
 from tqdm import tqdm
 from transformers import AutoTokenizer
-from src.agent_config import get_agent_config
-from src.logger import get_logger
-from src.api_interface import DattaBotAPIResponse
-from src.util import get_tensor_dtype_from_config
 
 
 # Define the enum for dataset selection
@@ -79,9 +75,13 @@ class DattabotDataLoader(TorchDataLoader):
                 1 if len(dataset) % batch_size != 0 else 0
             )
         # Initialize the iterators
+        start_time = time.time()
         self.logger.info(f"Setting up iterator for {__class__}")
         self._data_iterator = self._get_iter()
         self.logger.info(f"Done setting up iterator for {__class__}!")
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        self.logger.info(f"Time taken to set up iterator: {elapsed_time:.4f} seconds")
 
     def __len__(self) -> int:
         """Return the number of batches in the dataloader."""
