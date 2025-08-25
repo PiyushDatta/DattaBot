@@ -38,4 +38,4 @@ env:
     validating_episodes: 100
     logging_level: "INFO"
     tensor_dtype: "float16"
-    dataset_name: "openwebtext"
+    dataset_name: "wikitext"

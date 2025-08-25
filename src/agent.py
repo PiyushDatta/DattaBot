@@ -623,7 +623,7 @@ class Agent:
         interrupted=False,
     ):
         # Create the directory if it doesn't exist
-        log_file_path = "training_log.txt"
+        log_file_path = "training_log.csv"
         # Create or open the log file and write the training details in CSV format.
         with open(log_file_path, "a", newline="") as log_file:
             writer = csv.writer(log_file)

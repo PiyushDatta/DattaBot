@@ -1,7 +1,7 @@
 import os
 import time
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import torch
 from datasets import load_dataset
@@ -45,53 +45,48 @@ class DattabotDataLoader(TorchDataLoader):
         data_dir: str = "./dattabot_data_dir",
         dataset_name: str = "ERROR_DID_NOT_INSERT_DATASET_NAME",
         dataset: Optional[Dataset] = None,
-        batch_size=32,
-        reset_batch_when_reach_end=True,
+        batch_size: int = 32,
+        reset_batch_when_reach_end: bool = True,
         **kwargs: Any,
     ) -> None:
-        # Setup config and logger, both singletons.
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
         self.logger.debug(f"{self.__class__.__name__} init.")
-        # Store tokenizer-related attributes
-        self.tokenizer = tokenizer
+        self.tokenizer: AutoTokenizer = tokenizer
         self.vocab_size: int = self.tokenizer.vocab_size
         self.bos_id: int = self.tokenizer.bos_token_id
         self.eos_id: int = self.tokenizer.eos_token_id
         self.pad_id: int = self.tokenizer.pad_token_id
         assert self.pad_id != -1, "Pad id can't be -1."
-        self.data_dir = data_dir
-        self.batch_size = batch_size
+        self.data_dir: str = data_dir
+        self.batch_size: int = batch_size
         self._tensor_dtype = get_tensor_dtype_from_config(config=self.config)
-        self._length = 0
-        self.reset_batch_end = reset_batch_when_reach_end
-        # If a dataset is provided, initialize the parent TorchDataLoader
-        self.dataset_name = dataset_name
-        self._dataset = dataset
+        self._length: int = 0
+        self.reset_batch_end: bool = reset_batch_when_reach_end
+        self.dataset_name: str = dataset_name
+        self._dataset: Optional[Dataset] = dataset
         if dataset is not None:
             self.logger.info("Preparing dataset...")
             super().__init__(dataset=dataset, batch_size=self.batch_size, **kwargs)
             self._length = len(dataset) // batch_size + (
                 1 if len(dataset) % batch_size != 0 else 0
             )
-        # Initialize the iterators
-        start_time = time.time()
+        start_time: float = time.time()
         self.logger.info(f"Setting up iterator for {__class__}")
-        self._data_iterator = self._get_iter()
+        self._data_iterator: Iterator[Any] = self._get_iter()
         self.logger.info(f"Done setting up iterator for {__class__}!")
-        end_time = time.time()
-        elapsed_time = end_time - start_time
+        end_time: float = time.time()
+        elapsed_time: float = end_time - start_time
         self.logger.info(f"Time taken to set up iterator: {elapsed_time:.4f} seconds")
 
     def __len__(self) -> int:
         """Return the number of batches in the dataloader."""
         return self._length
 
-    def __next__(self) -> Any:
+    def __next__(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Get the next batch in iteration, with optional reset."""
         try:
-            # Retrieve the next batch from the current iterator
-            batch = next(self._data_iterator)
+            batch: Any = next(self._data_iterator)
         except StopIteration:
             self.logger.debug(
                 f"While getting next iterator, reached end of data iterator. StopIteration. Value of self.reset_batch_end: {self.reset_batch_end}"
@@ -103,10 +98,10 @@ class DattabotDataLoader(TorchDataLoader):
                 raise StopIteration
         return batch
 
-    def _reset(self):
+    def _reset(self) -> None:
         self._data_iterator = self._get_iter()
 
-    def _get_iter(self):
+    def _get_iter(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         return super().__iter__()
 
 
@@ -170,9 +165,11 @@ class DattabotDataBuilder:
                 train_data = split_dataset["train"]
                 validation_data = split_dataset["test"]
             case DatasetType.WIKITEXT:
-                # WikiText-103 specifically.
+                # wikitext-2-raw-v1: ~2M tokens
+                # wikitext-103-raw-v1: ~100M tokens
+                # Use wikitext-2-raw-v1 for now, for faster training.
                 dataset = load_dataset(
-                    "wikitext", "wikitext-103-raw-v1", trust_remote_code=True
+                    "wikitext", "wikitext-2-raw-v1", trust_remote_code=True
                 )
                 train_data = dataset["train"]
                 validation_data = dataset["validation"]
@@ -244,28 +241,28 @@ class DattabotDataBuilder:
             self.logger.info(f"Loading our training custom torch dataloader.")
             train_dataloader = DattabotDataLoader(
                 tokenizer=self.tokenizer,
-                dataset_name=self.dataset_name,
+                dataset_name=self.dataset_name.name,
                 dataset=train_dataset,
                 batch_size=self.batch_size,
                 shuffle=True,
-                num_workers=os.cpu_count(),
+                num_workers=4,
                 pin_memory=True,
                 prefetch_factor=2,
-                persistent_workers=True,
+                persistent_workers=False,
                 generator=torch.Generator(device=self.config.env.device),
                 reset_batch_when_reach_end=True,
             )
             self.logger.info(f"Loading our validation custom torch dataloader.")
             val_dataloader = DattabotDataLoader(
                 tokenizer=self.tokenizer,
-                dataset_name=self.dataset_name,
+                dataset_name=self.dataset_name.name,
                 dataset=val_dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
-                num_workers=os.cpu_count(),
+                num_workers=4,
                 pin_memory=True,
                 prefetch_factor=2,
-                persistent_workers=True,
+                persistent_workers=False,
                 generator=torch.Generator(device=self.config.env.device),
                 reset_batch_when_reach_end=True,
             )
