@@ -17,36 +17,26 @@ def main():
         run_client()
 
 
-def run_tests(arg_list: list[str] = [""]):
+def run_tests(arg_list: list[str] = None):
+    if arg_list is None:
+        arg_list = []
+
     command = [
-        _get_python_executable(),
+        sys.executable,
         "-m",
-        "unittest",
-        "-v",
-        "tests.test_api",
+        "pytest",
+        "tests",  # test directory
+        "-v",  # verbose
     ] + arg_list
+
     print(f"Running command: {' '.join(command)}")
-    subprocess.run(command)
+    subprocess.run(command, check=True)
 
 
 def run_client():
-    command = [_get_python_executable(), "client.py"]
+    command = [sys.executable, "client.py"]
     print(f"Running command: {' '.join(command)}")
     subprocess.run(command)
-
-
-def _get_python_executable() -> str:
-    # Check if in a virtual environment
-    if hasattr(sys, "real_prefix") or (
-        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
-    ):
-        return (
-            os.path.join(sys.prefix, "bin", "python")
-            if sys.platform != "win32"
-            else os.path.join(sys.prefix, "Scripts", "python.exe")
-        )
-    else:
-        return "python"
 
 
 if __name__ == "__main__":

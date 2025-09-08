@@ -12,7 +12,7 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
     - Windows powershell: `dattabot_venv\Scripts\Activate.ps1`
     - Linux/Mac/Other: `source dattabot_venv/bin/activate`
 3. Pip install all dependencies
-    - `pip install -r requirements.txt`
+    - `python -m pip install -r requirements.txt`
 4. Git LFS install and pull the weights (DATTABOT_VERSION_x_x_weights.pt)
     - `git lfs install && git lfs pull`
 

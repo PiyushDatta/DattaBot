@@ -10,14 +10,14 @@ from torch import (
     set_default_device as torch_set_default_device,
 )
 from numpy import sqrt as np_sqrt
-from transformers import AutoTokenizer
+from src.tokenizer import get_tokenizer, DattaBotTokenizer
 from src.logger import get_logger
 from src.agent_config import get_agent_config
 
 
 # Transformer Model.
 class DattaBotModel(nn.Module):
-    def __init__(self, tokenizer: AutoTokenizer) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
@@ -25,10 +25,10 @@ class DattaBotModel(nn.Module):
         # TODO(PiyushDatta): Once supported, set default dtype as int64. Currently
         #                    only float types are supported.
         torch_set_default_device(self.device)
-        # Assumes tokenizer is already setup.
-        assert tokenizer is not None
-        self.tokenizer = tokenizer
-        self.vocab_size = self.tokenizer.vocab_size
+        self.vocab_size = get_tokenizer().vocab_size
+        assert (
+            self.vocab_size is not None and self.vocab_size > 0
+        ), f"Invalid vocab size: {self.vocab_size}"
         self.n_layers = self.config.neural_net.n_layers
         self.n_heads = self.config.neural_net.n_heads
         self.model_dimensions = self.config.neural_net.model_dimensions
@@ -39,13 +39,11 @@ class DattaBotModel(nn.Module):
             n_layers=self.n_layers,
             n_heads=self.n_heads,
             model_embedding_dims=self.model_dimensions,
-            tokenizer=tokenizer,
         )
         self.decoder_stack = TransformerDecoderStack(
             n_layers=self.n_layers,
             n_heads=self.n_heads,
             model_embedding_dims=self.model_dimensions,
-            tokenizer=tokenizer,
         )
         # Output projection layer to convert to the words in our training set.
         self.output_projection = nn.Linear(self.model_dimensions, self.vocab_size)
@@ -78,7 +76,6 @@ class TransformerEncoderStack(nn.Module):
         n_layers: int,
         n_heads: int,
         model_embedding_dims: int,
-        tokenizer: AutoTokenizer,
     ) -> None:
         super().__init__()
         self.config = get_agent_config()
@@ -88,7 +85,7 @@ class TransformerEncoderStack(nn.Module):
         self.model_embedding_dims = model_embedding_dims
         # Embedding layer.
         self.embedding_layer = TransformerEmbedding(
-            tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
+            embedded_dim_size=self.model_embedding_dims
         )
         # Positional Embedding.
         self.positional_encoding = TransformerPositionalEncoding(
@@ -97,9 +94,7 @@ class TransformerEncoderStack(nn.Module):
         # Multiple attention layers.
         self.layers = nn.ModuleList(
             [
-                TransformerEncoderBlock(
-                    tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
-                )
+                TransformerEncoderBlock(embedded_dim_size=self.model_embedding_dims)
                 for _ in range(self.n_layers)
             ]
         )
@@ -118,7 +113,6 @@ class TransformerDecoderStack(nn.Module):
         n_layers: int,
         n_heads: int,
         model_embedding_dims: int,
-        tokenizer: AutoTokenizer,
     ) -> None:
         super().__init__()
         self.config = get_agent_config()
@@ -128,7 +122,7 @@ class TransformerDecoderStack(nn.Module):
         self.model_embedding_dims = model_embedding_dims
         # Embedding layer.
         self.embedding_layer = TransformerEmbedding(
-            tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
+            embedded_dim_size=self.model_embedding_dims
         )
         # Positional Embedding.
         self.positional_encoding = TransformerPositionalEncoding(
@@ -137,9 +131,7 @@ class TransformerDecoderStack(nn.Module):
         # Multiple attention layers.
         self.layers = nn.ModuleList(
             [
-                TransformerDecoderBlock(
-                    tokenizer=tokenizer, embedded_dim_size=self.model_embedding_dims
-                )
+                TransformerDecoderBlock(embedded_dim_size=self.model_embedding_dims)
                 for _ in range(self.n_layers)
             ]
         )
@@ -155,14 +147,12 @@ class TransformerDecoderStack(nn.Module):
 class TransformerEncoderBlock(nn.Module):
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
         embedded_dim_size: int,
     ) -> None:
         super().__init__()
         self.config = get_agent_config()
-        self.tokenizer = tokenizer
         self.multi_head_attn = TransformerMultiHeadAttention(
-            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
+            embedded_dim_size=embedded_dim_size
         )
         self.multi_head_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
         self.position_wise_ffn = TransformerPositionWiseFeedForward()
@@ -187,20 +177,18 @@ class TransformerEncoderBlock(nn.Module):
 class TransformerDecoderBlock(nn.Module):
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
         embedded_dim_size: int,
     ) -> None:
         super().__init__()
         self.config = get_agent_config()
-        self.tokenizer = tokenizer
         # Self attention.
         self.multi_head_attn = TransformerMultiHeadAttention(
-            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
+            embedded_dim_size=embedded_dim_size
         )
         self.multi_head_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
         # Cross attention.
         self.cross_attn = TransformerMultiHeadAttention(
-            tokenizer=self.tokenizer, embedded_dim_size=embedded_dim_size
+            embedded_dim_size=embedded_dim_size
         )
         self.cross_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
         # Feed forward.
@@ -238,10 +226,13 @@ class TransformerDecoderBlock(nn.Module):
 
 
 class TransformerEmbedding(nn.Module):
-    def __init__(self, tokenizer: AutoTokenizer, embedded_dim_size: int) -> None:
+    def __init__(self, embedded_dim_size: int) -> None:
         super().__init__()
         self.config = get_agent_config()
-        self.vocab_size = tokenizer.vocab_size
+        self.vocab_size = get_tokenizer().vocab_size
+        assert (
+            self.vocab_size is not None and self.vocab_size > 0
+        ), f"Invalid vocab size: {self.vocab_size}"
         self.embeddings_table = nn.Embedding(
             num_embeddings=self.vocab_size, embedding_dim=embedded_dim_size
         )
@@ -301,7 +292,7 @@ class TransformerPositionWiseFeedForward(nn.Module):
 
 
 class TransformerMultiHeadAttention(nn.Module):
-    def __init__(self, tokenizer: AutoTokenizer, embedded_dim_size: int) -> None:
+    def __init__(self, embedded_dim_size: int) -> None:
         super().__init__()
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
@@ -311,7 +302,6 @@ class TransformerMultiHeadAttention(nn.Module):
             [
                 TransformerScaledDotProductAttention(
                     output_size=self.attention_output_size,
-                    tokenizer=tokenizer,
                     embedded_dim_size=embedded_dim_size,
                 )
                 for _ in range(self.n_heads)
@@ -333,13 +323,11 @@ class TransformerMultiHeadAttention(nn.Module):
 
 
 class TransformerScaledDotProductAttention(nn.Module):
-    def __init__(
-        self, output_size, tokenizer: AutoTokenizer, embedded_dim_size: int
-    ) -> None:
+    def __init__(self, output_size, embedded_dim_size: int) -> None:
         super().__init__()
         self.config = get_agent_config()
         self.output_size = output_size
-        self.pad_id = tokenizer.pad_token_id
+        self.pad_id = get_tokenizer().pad_token_id
         self.query_layer = nn.Linear(
             in_features=embedded_dim_size, out_features=output_size
         )

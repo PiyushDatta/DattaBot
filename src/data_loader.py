@@ -9,12 +9,12 @@ from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
 from src.logger import get_logger
 from src.util import get_tensor_dtype_from_config
+from src.tokenizer import get_tokenizer, DattaBotTokenizer
 from torch import cat, dtype as torch_dtype, nn, tensor, Tensor
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset
 from torchtext.vocab import build_vocab_from_iterator
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 
 # Define the enum for dataset selection
@@ -41,7 +41,6 @@ def string_to_enum(dataset_name: str) -> DatasetType:
 class DattabotDataLoader(TorchDataLoader):
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
         data_dir: str = "./dattabot_data_dir",
         dataset_name: str = "ERROR_DID_NOT_INSERT_DATASET_NAME",
         dataset: Optional[Dataset] = None,
@@ -52,7 +51,7 @@ class DattabotDataLoader(TorchDataLoader):
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
         self.logger.debug(f"{self.__class__.__name__} init.")
-        self.tokenizer: AutoTokenizer = tokenizer
+        self.tokenizer: DattaBotTokenizer = get_tokenizer()
         self.vocab_size: int = self.tokenizer.vocab_size
         self.bos_id: int = self.tokenizer.bos_token_id
         self.eos_id: int = self.tokenizer.eos_token_id
@@ -108,7 +107,6 @@ class DattabotDataLoader(TorchDataLoader):
 class DattabotDataBuilder:
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
         **kwargs: Any,
     ) -> None:
         # Setup config and logger, both singletons.
@@ -116,7 +114,7 @@ class DattabotDataBuilder:
         self.logger = get_logger(logging_level=self.config.env.logging_level)
         self.logger.debug(f"{self.__class__.__name__} init.")
         # Tokenizer
-        self.tokenizer = tokenizer
+        self.tokenizer = get_tokenizer()
         self._tensor_dtype = get_tensor_dtype_from_config(config=self.config)
         # Batch size
         self.batch_size = self.config.agent.batch_size
@@ -282,101 +280,13 @@ class DattabotDataBuilder:
     def tensor_dtype(self, value: torch.dtype) -> None:
         self._tensor_dtype = value
 
-    def convert_queries_to_tensors(
-        self, queries: list[str], max_sequence_len: int
-    ) -> tuple[Tensor, int]:
-        """
-        Returns tuple[Tensor, int].
-        Returns tuple[queries converted to tensors, total number of batches].
-        """
-        # Encode the list of queries using the tokenizer
-        encodings: list[list[int]] = self.tokenizer_encode(decoded_queries=queries)
-
-        # For each encoded query: Convert to tensor and pad
-        padded_tensors: list[Tensor] = [
-            nn.functional.pad(
-                tensor(seq, dtype=self.tensor_dtype),
-                (0, max_sequence_len - len(seq)),
-                mode="constant",
-                value=self.pad_id,
-            )
-            for seq in encodings
-        ]
-
-        # Combine all tensors into one with shape (len(queries), max_sequence_len)
-        encoded_tensor: Tensor = pad_sequence(
-            [query_tensor for query_tensor in padded_tensors],
-            batch_first=True,
-            padding_value=self.pad_id,
-        )
-
-        # Record dimensions before processing
-        total_batch_size = encoded_tensor.size(0)
-        sequence_len = encoded_tensor.size(1)
-
-        # Flatten and filter empty tensors
-        encoded_tensor = cat(tuple(filter(lambda t: t.numel() > 0, encoded_tensor)))
-
-        # Process into batches
-        batch_size = min(total_batch_size, self.batch_size)
-        total_number_of_elements = sequence_len * min(total_batch_size, batch_size)
-        encoded_tensor = encoded_tensor[:total_number_of_elements]
-
-        # Reshape into (batch_size, sequence_len)
-        encoded_tensor = encoded_tensor.view(batch_size, sequence_len).contiguous()
-
-        return encoded_tensor, total_number_of_elements // batch_size
-
-    def convert_tensors_to_responses(self, tensor_resps: list[Tensor]) -> dict:
-        if not tensor_resps:
-            return {"query_response": "No responses generated."}
-
-        # Concatenate tensors along last dimension
-        tensor_response = torch.cat(tensor_resps, dim=0)
-
-        # Convert to float if needed
-        if self.tensor_dtype != torch.float:
-            tensor_response = tensor_response.float()
-
-        # Apply softmax and get predicted indices
-        softmax_output = nn.functional.softmax(tensor_response, dim=-1)
-        predicted_indices = torch.argmax(softmax_output, dim=-1)
-
-        # Decode responses
-        decoded_responses = []
-        for response_tensor in predicted_indices:
-            decoded_output = self.tokenizer.decode(
-                response_tensor.tolist(),
-                skip_special_tokens=True,
-            )
-            decoded_responses.append(decoded_output)
-
-        return {
-            "query_response": " ".join(decoded_responses),
-            "tensor_response": tensor_response,
-        }
-
-    def tokenizer_encode(self, decoded_queries: list[str]) -> list[list[int]]:
-        return [
-            self.tokenizer.encode_plus(
-                query,
-                add_special_tokens=True,
-            )["input_ids"]
-            for query in decoded_queries
-        ]
-
-    def tokenizer_decode(self, encoded_queries: list[list[int]]) -> list[str]:
-        return [self.tokenizer.decode(query) for query in encoded_queries]
-
 
 class TextDataset(Dataset):
-    def __init__(
-        self, data: list[str], tokenizer: AutoTokenizer, vocab, seq_length: int = 256
-    ):
+    def __init__(self, data: list[str], vocab, seq_length: int = 256):
         self.data = data
         self.vocab = vocab
         self.seq_length = seq_length
-        self.tokenizer = tokenizer
+        self.tokenizer: DattaBotTokenizer = get_tokenizer()
 
     def __len__(self) -> int:
         return len(self.data)

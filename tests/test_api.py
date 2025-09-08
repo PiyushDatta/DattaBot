@@ -1,11 +1,10 @@
-import unittest
-
-# setting path
 import sys
+import pytest
+from torch import Tensor
 
+# set path to project
 sys.path.append("../dattabot")
 
-from src.util import Tensor
 from src.api import DattaBotAPI, DattaBotAPIException, DattaBotAPIResponse
 from src.agent_config import get_agent_config
 from src.logger import get_logger
@@ -15,46 +14,70 @@ config = get_agent_config()
 datta_bot_api = DattaBotAPI()
 
 
-class TestDattaBotAPI(unittest.TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
-
-    def test_smoke_dattabot(self):
-        self.assertEqual(1, 1)
-
-    def test_tensor_encoding(self):
-        # One query.
-        one_query = ["Helloooo!"]
-        resp: DattaBotAPIResponse = datta_bot_api.get_tensor_encoding(one_query)
-        self.assertIsNotNone(resp)
-        self.assertIsNotNone(resp.tensor_response)
-        self.assertIsInstance(resp.tensor_response, Tensor)
-        self.assertEqual(resp.tensor_response.size(dim=0), len(one_query))
-        # Two queries.
-        two_queries = ["Hello!", "We've met already."]
-        resp: DattaBotAPIResponse = datta_bot_api.get_tensor_encoding(two_queries)
-        self.assertIsNotNone(resp)
-        self.assertIsNotNone(resp.tensor_response)
-        self.assertIsInstance(resp.tensor_response, Tensor)
-        self.assertEqual(resp.tensor_response.size(dim=0), len(two_queries))
-
-    def test_respond_to_queries(self):
-        three_queries = ["Hello!", "We've met already.", "Okay, nice to meet again."]
-        resp: DattaBotAPIResponse = datta_bot_api.respond_to_queries(three_queries)
-        logger.debug("Debug printing for test: test_respond_to_queries")
-        logger.debug(f"Query response:\n{resp.query_response}")
-        logger.debug(f"Query tensor response:\n{resp.tensor_response}")
-        logger.debug(f"Query tensor response shape:\n{resp.tensor_response.shape}")
-        self.assertIsNotNone(resp)
-
-    # TODO(PiyushDatta): Get this test working.
-    # def test_error_response_to_queries(self) -> str:
-    #     queries = ["Hello world"]
-    #     self.assertRaises(
-    #         DattaBotAPIException,
-    #         self.datta_bot_api._get_agent_action(queries=queries, action_type=-1),
-    #     )
+def test_smoke_dattabot():
+    """Simple smoke test"""
+    assert 1 == 1
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_tensor_encoding_one_query():
+    one_query = ["Helloooo!"]
+    responses: list[DattaBotAPIResponse] = datta_bot_api.get_tensor_encoding(one_query)
+    resp = responses[0]
+
+    assert resp is not None
+    assert hasattr(resp, "tensor_response")
+    assert isinstance(resp.tensor_response, Tensor)
+    # batch dimension
+    assert resp.tensor_response.size(0) == len(one_query), (
+        f"Expected batch size {len(one_query)}, "
+        f"but got {resp.tensor_response.size(0)}"
+    )
+    # (batch, seq_len)
+    assert resp.tensor_response.ndim == 2, (
+        f"Expected tensor to have 2 dimensions (batch, seq_len), "
+        f"but got {resp.tensor_response.ndim}"
+    )
+
+
+def test_tensor_encoding_two_queries():
+    two_queries = ["Hello!", "We've met already."]
+    responses: list[DattaBotAPIResponse] = datta_bot_api.get_tensor_encoding(
+        two_queries
+    )
+    for resp in responses:
+        assert resp is not None
+        assert hasattr(resp, "tensor_response")
+        assert isinstance(resp.tensor_response, Tensor)
+        # batch dimension
+        assert resp.tensor_response.size(0) == len(two_queries), (
+            f"Expected batch size {len(two_queries)}, "
+            f"but got {resp.tensor_response.size(0)}"
+        )
+        # (batch, seq_len)
+        assert resp.tensor_response.ndim == 2, (
+            f"Expected tensor to have 2 dimensions (batch, seq_len), "
+            f"but got {resp.tensor_response.ndim}"
+        )
+
+
+def test_single_response_text():
+    query = "How are you?"
+    resp: DattaBotAPIResponse = datta_bot_api.get_response(query)
+    assert isinstance(resp, DattaBotAPIResponse)
+    assert hasattr(resp, "text")
+    assert isinstance(resp.text, str)
+
+
+def test_encoding_and_decoding_roundtrip():
+    queries = ["Roundtrip test."]
+    encoding_resp: DattaBotAPIResponse = datta_bot_api.get_encoding(queries)[0]
+    assert hasattr(encoding_resp, "tokenizer_encodings")
+    encodings = encoding_resp.tokenizer_encodings
+    assert isinstance(encodings, list)
+    assert all(isinstance(seq, list) for seq in encodings)
+
+    decoding_resp: DattaBotAPIResponse = datta_bot_api.get_decoding(encodings)[0]
+    assert hasattr(decoding_resp, "tokenizer_decodings")
+    decodings = decoding_resp.tokenizer_decodings
+    assert isinstance(decodings, list)
+    assert all(isinstance(text, str) for text in decodings)

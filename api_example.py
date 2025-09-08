@@ -30,7 +30,7 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
             queries = api_args.split(DELIMITER)
             # Strip whitespace from each query.
             queries = [query.strip() for query in queries]
-            responses: DattaBotAPIResponse = api_client.respond_to_queries(
+            responses: list[DattaBotAPIResponse] = api_client.respond_to_queries(
                 queries=queries
             )
             print(responses)

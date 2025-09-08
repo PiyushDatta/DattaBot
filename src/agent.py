@@ -8,6 +8,7 @@ import torch
 import torch.cuda.amp as amp
 import torch.multiprocessing as mp
 import tqdm
+from src.communication_mgr import CommunicationManager
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
 from src.data_loader import DattabotDataBuilder, DattabotDataLoader
@@ -16,13 +17,13 @@ from src.data_loader import DattabotDataBuilder, DattabotDataLoader
 # from src.optim_shampoo import Shampoo
 from src.gpu_profiler import BackgroundGPUProfiler
 
+from src.util import get_tensor_dtype_from_config
 from src.logger import get_logger
 from src.model import DattaBotModel
-from src.util import get_tensor_dtype_from_config
+from src.tokenizer import get_tokenizer
 from torch import nn, Tensor
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer
 
 
 class Agent:
@@ -34,30 +35,21 @@ class Agent:
         self.agent_fname_prefix = "DATTABOT_VERSION_1_0"
         self.data_dir = self.config.agent.data_directory
         self.plot_dir = self.config.agent.plot_directory
+        self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         # Device (gpu or cpu or other)
         self.agent_device = self.config.env.device
         # Setup tokenizer.
-        tokenizer_model_name = "distilbert-base-uncased"
-        self.tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_model_name
-        )
-        # Add bos and eos tokens and ids
-        self.tokenizer.bos_token = self.tokenizer.cls_token
-        self.tokenizer.eos_token = self.tokenizer.sep_token
-        self.tokenizer.bos_token_id = self.tokenizer.convert_tokens_to_ids(
-            self.tokenizer.bos_token
-        )
-        self.tokenizer.eos_token_id = self.tokenizer.convert_tokens_to_ids(
-            self.tokenizer.eos_token
-        )
+        self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
+        self.comm_manager = CommunicationManager()
+        tokenizer_model_name = repr(self.tokenizer)
         # Things go bad when pad_id is -1.
         # Pad token is -1, change it to eos token.
         assert self.tokenizer.pad_token_id != -1, f"Pad id can't be -1."
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
         # Setup data loader.
-        self.data_builder = DattabotDataBuilder(tokenizer=self.tokenizer)
+        self.data_builder = DattabotDataBuilder()
         # Setup model.
-        self.model = DattaBotModel(tokenizer=self.tokenizer)
+        self.model = DattaBotModel()
         # Batch size.
         self.batch_size = self.config.agent.batch_size
         self.logger.debug(f"Batch size: {self.batch_size}")
@@ -71,8 +63,7 @@ class Agent:
         self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
         self.load_agent(filepath=self.weights_fname)
         self.lr = self.config.agent.lr
-        # With ignore_index=pad_token_id - padding tokens should not contribute to loss.
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
+        self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
@@ -112,6 +103,14 @@ class Agent:
         # Setup GPU settings/optimizations if we have a GPU.
         if not is_device_cpu(self.agent_device):
             self.setup_gpu_settings()
+
+    @property
+    def tokenizer_obj(self):
+        """
+        Accessor for the tokenizer object.
+        Example usage: agent.tokenizer_obj.encode(["Hello"])
+        """
+        return self.tokenizer
 
     def setup_gpu_settings(self):
         # Initialize AMP scaler
@@ -543,71 +542,66 @@ class Agent:
         )
         return avg_loss
 
-    def _inference(self, queries: list[str]) -> DattaBotAPIResponse:
+    def _inference(self, queries: list[str]) -> list[DattaBotAPIResponse]:
         """
         Generate responses for a list of queries using the trained model.
         Args:
             queries: A list of input queries to process.
         Returns:
-            A DattaBotAPIResponse containing the model's responses.
+            A list of DattaBotAPIResponse objects (one per query).
         """
-        # Validate input
-        if not queries or len(queries) == 0:
+        if not queries:
             self.logger.warning("No queries provided for inference.")
-            return DattaBotAPIResponse(query_response="No queries to process.")
+            return [DattaBotAPIResponse(query_response="No queries to process.")]
 
         self.model.eval()
-        response = DattaBotAPIResponse()
-        response.query_response = "Starting inference."
+        responses: list[DattaBotAPIResponse] = []
+
         try:
-            # Log the incoming queries.
             self.logger.info(f"Processing {len(queries)} queries for inference.")
+            # Convert queries to padded tensors
+            batch_tensor, _ = self.convert_queries_to_tensors(queries)
+            batch_tensor = batch_tensor.to(
+                dtype=self.tensor_dtype, device=self.agent_device
+            )
+            batch_size, _ = batch_tensor.shape
+
+            assert batch_size == len(
+                queries
+            ), f"Batch size mismatch: {batch_size} != {len(queries)}"
+
             with torch.no_grad():
-                for query in queries:
-                    for _ in range(self.response_max_response_tokens):
-                        # Tokenize the query.
-                        src_input = self.tokenizer.encode(
-                            query, padding=True, truncation=True, return_tensors="pt"
-                        ).to(self.agent_device)
-                        tgt_input = torch.tensor(
-                            [[self.tokenizer.bos_token_id]], device=self.agent_device
-                        )
-                        generated_sequence = []
-                        # Pass through the model to get logits.
-                        output_logits = self.model(
-                            src_input=src_input,
-                            src_mask=None,
-                            tgt_input=tgt_input,
-                            tgt_mask=None,
-                        )
-                        # 1. Get the predicted token IDs.
-                        # Should be shape: [1, 4]
-                        # Apply temperature scaling
-                        predicted_ids = output_logits.argmax(dim=-1)
-                        # 2. Since we want to decode all predicted token IDs,
-                        # we need to squeeze the batch dimension (if there's only one batch)
-                        # Should be shape: [4]
-                        predicted_ids = predicted_ids.squeeze(0)
-                        # Check for EOS token
-                        if self.tokenizer.eos_token_id in predicted_ids.tolist():
-                            break
-                        # Update tgt_input with the latest predictions for next iteration
-                        tgt_input = predicted_ids.unsqueeze(0)
-                    # Decode the generated sequence of token IDs to get the output text
-                    predicted_text = self.tokenizer.decode(
-                        predicted_ids, skip_special_tokens=True
+                # shape: (batch_size, seq_len, vocab_size)
+                logits: Tensor = self.model(batch_tensor)
+
+                # Greedy decoding → (batch_size, seq_len)
+                predicted_ids: Tensor = torch.argmax(logits, dim=-1)
+
+                # Decode tokens back into text
+                decoded_responses: list[str] = self.tokenizer.decode(
+                    tokens_or_tokens_list=predicted_ids.tolist()
+                )
+
+            # Build one DattaBotAPIResponse per query
+            for i, _ in enumerate(queries):
+                responses.append(
+                    DattaBotAPIResponse(
+                        query_response=decoded_responses[i],
+                        tensor_response=predicted_ids[i],
+                        tokenizer_encodings=batch_tensor[i].tolist(),
+                        tokenizer_decodings=decoded_responses[i],
                     )
-                    generated_sequence.append(predicted_text)
-            # Convert tensor responses to API response format
-            response.query_response = "Inference completed."
-            response.query_response = " ".join(generated_sequence)
-            self.logger.debug(f"Generated response - {response}")
+                )
+
         except Exception as e:
             self.logger.error(f"An error occurred during inference: {e}")
-            response.query_response = (
-                "An error occurred while processing your request. Please try again."
-            )
-        return response
+            return [
+                DattaBotAPIResponse(
+                    query_response="An error occurred while processing your request. Please try again."
+                )
+            ]
+
+        return responses
 
     def _log_training_details(
         self,
@@ -669,29 +663,53 @@ class Agent:
             )
         self.logger.info(f"Training details logged to {log_file_path}")
 
-    def respond_to_queries(self, queries: list[str]) -> DattaBotAPIResponse:
+    def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
         self.logger.info(f"Processing queries: {queries}")
         # Call the inference method
-        response = self._inference(queries=queries)
+        responses: list[DattaBotAPIResponse] = self._inference(queries=queries)
+        assert isinstance(responses, list), f"Expected list, got {type(responses)}"
+        assert all(
+            isinstance(r, DattaBotAPIResponse) for r in responses
+        ), "All responses must be DattaBotAPIResponse"
         # Log the results
-        self.logger.debug(f"Query Response: {response.query_response}")
-        self.logger.debug(f"Number of Batches: {response.num_batches}")
-        self.logger.debug(f"Tensor Response: {response.tensor_response}")
-        return response
-
-    def tokenizer_encode(self, decoded_queries: list[str]) -> list[list[int]]:
-        return self.data_builder.tokenizer_encode(decoded_queries=decoded_queries)
-
-    def tokenizer_decode(self, encoded_queries: list[list[int]]) -> list[str]:
-        return self.data_builder.tokenizer_decode(encoded_queries=encoded_queries)
+        self.logger.debug(f"Query Response for first response: {responses[0].query_response}")
+        self.logger.debug(f"Number of Batches for first response: {responses[0].num_batches}")
+        self.logger.debug(f"Tensor Response for the first response: {responses.tensor_response}")
+        self.logger.debug(f"Number of responses: {len(responses)}")
+        return responses
 
     def convert_queries_to_tensors(self, queries: list[str]) -> tuple[Tensor, int]:
-        return self.data_builder.convert_queries_to_tensors(queries=queries)
-
-    def convert_tensors_to_responses(
-        self, tensor_resps: list[Tensor]
-    ) -> DattaBotAPIResponse:
-        return self.data_builder.convert_tensors_to_responses(tensor_resps=tensor_resps)
+        """
+        Encode a list of queries and convert them to a padded tensor.
+        Returns:
+            - Tensor of shape (batch_size, max_sequence_len)
+            - Total number of batches
+        """
+        if not queries:
+            return torch.empty(0, 0, dtype=torch.long), 0
+        # Encode queries using the tokenizer (batch mode).
+        tokenized_queries: list[list[int]] = self.tokenizer.encode(queries)
+        # Find max sequence length.
+        max_seq_len = max(len(seq) for seq in tokenized_queries)
+        # Pad each sequence to max_seq_len.
+        padded_tensors = [
+            (
+                torch.tensor(seq, dtype=torch.long)
+                if len(seq) == max_seq_len
+                else nn.functional.pad(
+                    torch.tensor(seq, dtype=torch.long),
+                    (0, max_seq_len - len(seq)),
+                    value=self.tokenizer.pad_token_id,
+                )
+            )
+            for seq in tokenized_queries
+        ]
+        # Stack into a single tensor (num_queries, max_seq_len)
+        encoded_tensor = torch.stack(padded_tensors, dim=0)
+        # Calculate batch info
+        total_batch_size = encoded_tensor.size(0)
+        num_batches = (total_batch_size + self.batch_size - 1) // self.batch_size
+        return encoded_tensor, num_batches
 
     def _get_gpu_info(self) -> list[str]:
         if torch.cuda.is_available() and self.agent_device != "cpu":
