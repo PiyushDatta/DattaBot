@@ -1,10 +1,10 @@
 import pytest
-from src.communication_mgr import CommunicationManager
+from src.communication_mgr import DattaBotCommunicationManager
 from src.api_interface import DattaBotAPIResponse
 
 
 def test_add_user_and_agent_messages():
-    cm = CommunicationManager()
+    cm = DattaBotCommunicationManager()
 
     cm.add_user_message("Hello, bot!")
     cm.add_agent_message("Hello, human!")
@@ -19,7 +19,7 @@ def test_add_user_and_agent_messages():
 
 
 def test_build_reply_adds_to_history():
-    cm = CommunicationManager()
+    cm = DattaBotCommunicationManager()
 
     reply_text = "This is a reply."
     resp = cm.build_reply(reply_text)
@@ -35,5 +35,5 @@ def test_build_reply_adds_to_history():
 
 
 def test_history_initially_empty():
-    cm = CommunicationManager()
+    cm = DattaBotCommunicationManager()
     assert cm.get_history() == []

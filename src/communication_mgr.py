@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 from src.api_interface import DattaBotAPIResponse
 
 
-class CommunicationManager:
+class DattaBotCommunicationManager:
     """
     Manages conversation history and context for the Agent.
     This is internal and not exposed outside the Agent.

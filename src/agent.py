@@ -8,7 +8,7 @@ import torch
 import torch.cuda.amp as amp
 import torch.multiprocessing as mp
 import tqdm
-from src.communication_mgr import CommunicationManager
+from src.communication_mgr import DattaBotCommunicationManager
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
 from src.data_loader import DattabotDataBuilder, DattabotDataLoader
@@ -40,7 +40,7 @@ class Agent:
         self.agent_device = self.config.env.device
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
-        self.comm_manager = CommunicationManager()
+        self.comm_manager = DattaBotCommunicationManager()
         tokenizer_model_name = repr(self.tokenizer)
         # Things go bad when pad_id is -1.
         # Pad token is -1, change it to eos token.
@@ -559,6 +559,9 @@ class Agent:
 
         try:
             self.logger.info(f"Processing {len(queries)} queries for inference.")
+            # Record all user queries in history
+            for q in queries:
+                self.comm_manager.add_user_message(q)
             # Convert queries to padded tensors
             batch_tensor, _ = self.convert_queries_to_tensors(queries)
             batch_tensor = batch_tensor.to(
@@ -584,23 +587,46 @@ class Agent:
 
             # Build one DattaBotAPIResponse per query
             for i, _ in enumerate(queries):
+                reply_text = decoded_responses[i]
+                self.comm_manager.add_agent_message(reply_text)
                 responses.append(
                     DattaBotAPIResponse(
-                        query_response=decoded_responses[i],
+                        query_response=reply_text,
                         tensor_response=predicted_ids[i],
                         tokenizer_encodings=batch_tensor[i].tolist(),
-                        tokenizer_decodings=decoded_responses[i],
+                        tokenizer_decodings=reply_text,
                     )
                 )
 
         except Exception as e:
             self.logger.error(f"An error occurred during inference: {e}")
-            return [
-                DattaBotAPIResponse(
-                    query_response="An error occurred while processing your request. Please try again."
-                )
-            ]
+            error_msg = (
+                "An error occurred while processing your request. Please try again."
+            )
+            self.comm_manager.add_agent_message(error_msg)
+            return [DattaBotAPIResponse(query_response=error_msg)]
 
+        return responses
+
+    def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
+        self.logger.info(f"Processing queries: {queries}")
+        # Call the inference method
+        responses: list[DattaBotAPIResponse] = self._inference(queries=queries)
+        assert isinstance(responses, list), f"Expected list, got {type(responses)}"
+        assert all(
+            isinstance(r, DattaBotAPIResponse) for r in responses
+        ), "All responses must be DattaBotAPIResponse"
+        # Log the results
+        self.logger.debug(
+            f"Query Response for first response: {responses[0].query_response}"
+        )
+        self.logger.debug(
+            f"Number of Batches for first response: {responses[0].num_batches}"
+        )
+        self.logger.debug(
+            f"Tensor Response for the first response: {responses.tensor_response}"
+        )
+        self.logger.debug(f"Number of responses: {len(responses)}")
         return responses
 
     def _log_training_details(
@@ -662,21 +688,6 @@ class Agent:
                 ]
             )
         self.logger.info(f"Training details logged to {log_file_path}")
-
-    def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
-        self.logger.info(f"Processing queries: {queries}")
-        # Call the inference method
-        responses: list[DattaBotAPIResponse] = self._inference(queries=queries)
-        assert isinstance(responses, list), f"Expected list, got {type(responses)}"
-        assert all(
-            isinstance(r, DattaBotAPIResponse) for r in responses
-        ), "All responses must be DattaBotAPIResponse"
-        # Log the results
-        self.logger.debug(f"Query Response for first response: {responses[0].query_response}")
-        self.logger.debug(f"Number of Batches for first response: {responses[0].num_batches}")
-        self.logger.debug(f"Tensor Response for the first response: {responses.tensor_response}")
-        self.logger.debug(f"Number of responses: {len(responses)}")
-        return responses
 
     def convert_queries_to_tensors(self, queries: list[str]) -> tuple[Tensor, int]:
         """
