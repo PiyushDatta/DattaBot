@@ -2,7 +2,7 @@ import csv
 import os
 import time
 from typing import Dict, Optional
-
+import traceback
 import matplotlib.pyplot as plt
 import torch
 import torch.cuda.amp as amp
@@ -216,7 +216,7 @@ class Agent:
 
     def train_agent(self) -> DattaBotAPIResponse:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
-        response.query_response = "Starting training."
+        response.text = "Starting training."
         self.logger.info("Started training")
         train_interrupted = False
         avg_train_loss = 0
@@ -238,7 +238,9 @@ class Agent:
             )
             # Set up data loaders
             self.logger.info("Setting up data.")
-            train_dataloader, val_dataloader, vocab = self.data_builder.setup_data()
+            train_dataloader, val_dataloader, vocab = self.data_builder.setup_data(
+                device_for_generator=self.agent_device
+            )
             # Actual training algorithm.
             self.logger.info(
                 f"Got training and validation data for dataset {train_dataloader.dataset_name}. Now going into training loop for "
@@ -287,7 +289,7 @@ class Agent:
                     )
                     self.logger.info(f"Best validation loss: {avg_val_loss:.2f}\n")
             # Done training!
-            response.query_response = (
+            response.text = (
                 f"Successfully trained on {response.num_train_batches} batches. Validated on {response.num_val_batches} batches."
                 f"View training progress at: tensorboard --logdir={self.writer.log_dir}"
             )
@@ -295,13 +297,14 @@ class Agent:
             # Stopped training because we cancelled it via ctrl+c (KeyboardInterrupt).
             train_interrupted = True
             err_msg = f"Training interrupted by user (ctrl+c)."
-            response.query_response = err_msg
+            response.text = err_msg
             self.logger.error(err_msg)
         except Exception as e:
-            # Stopped training.
-            err_msg = f"Stopped training! Something unexpected happened. Error:\n{e}"
-            response.query_response = err_msg
+            err_msg = f"Stopped training! Something unexpected happened: {e}"
+            tb_str = traceback.format_exc()
             self.logger.error(err_msg)
+            self.logger.error(f"An error occurred during training:\n{tb_str}")
+            response.text = err_msg
         # Log the training details, including the time taken to train.
         train_end_time = time.time()
         total_training_time = train_end_time - train_start_time
@@ -340,47 +343,27 @@ class Agent:
         # Go through all the batches.
         for batch_idx in progress_bar:
             batch = next(dataloader)
-            # Unpack the batch - batch is a list of [src_data, tgt_data]
-            src_data, tgt_data = batch[0], batch[1]
-            # Move tensors to device
-            src_data = src_data.to(self.agent_device)
-            tgt_data = tgt_data.to(self.agent_device)
-            # Create attention mask (1 for real tokens, 0 for padding)
-            attention_mask = (src_data != self.tokenizer.pad_token_id).to(
+            # [batch, seq_len]
+            input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
                 self.agent_device
             )
-            # Create causal mask for decoder
-            seq_length = src_data.size(1)
-            causal_mask = torch.triu(
-                torch.ones((seq_length, seq_length), device=self.agent_device),
-                diagonal=1,
-            ).bool()
+            # Attention mask (1 for real tokens, 0 for pad)
+            attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
+                self.agent_device
+            )
             # Zero the gradients.
             self.optimizer.zero_grad()
             # Model predicts.
             # shape: [batch_size, sequence_length, vocab_size]
             with amp.autocast(enabled=(not is_device_cpu(self.agent_device))):
-                output_logits = self.model(
-                    src_input=src_data,
-                    src_mask=attention_mask,
-                    tgt_input=tgt_data,
-                    tgt_mask=causal_mask,
-                )
-                # Validate shapes before loss computation
-                vocab_dim = output_logits.size(-1)
-                assert (
-                    vocab_dim == tgt_vocab_size
-                ), f"Expected vocab size {tgt_vocab_size}, but got {vocab_dim}."
-                # Forward and backward pass.
-                loss = self.criterion(
-                    # reshape to [batch_size*seq_len, vocab_size]
-                    # output_logits.contiguous().view(-1, tgt_vocab_size.size(-1)),
-                    output_logits.contiguous().view(-1, tgt_vocab_size),
-                    # reshape to [batch_size*seq_len]
-                    tgt_data.view(-1),
-                )
+                # Forward pass
+                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                # [batch*seq_len, vocab]
+                logits = logits.view(-1, tgt_vocab_size)
+                labels = labels.view(-1)
+                loss = self.criterion(logits, labels)
                 # If using CrossEntropyLoss, mask out padding tokens.
-                padding_mask = tgt_data.view(-1) != self.tokenizer.pad_token_id
+                padding_mask = labels != self.tokenizer.pad_token_id
                 loss = (loss * padding_mask).sum() / padding_mask.sum()
             if self.scaler:
                 self.scaler.scale(loss).backward()
@@ -405,11 +388,12 @@ class Agent:
             # Update metrics
             total_loss += loss.item()
             total_steps += 1
+            avg_loss = total_loss / total_steps
             # Update progress bar
             progress_bar.set_postfix(
                 {
-                    "loss": total_loss / total_steps,
-                    "perplexity": torch.exp(torch.tensor(total_loss / total_steps)),
+                    "loss": avg_loss,
+                    "perplexity": torch.exp(torch.tensor(avg_loss)),
                 }
             )
             if total_steps % log_and_plot_every_x_steps == 0:
@@ -423,6 +407,22 @@ class Agent:
                             "train/learning_rate": self.optimizer.param_groups[0]["lr"],
                         }
                     )
+                )
+                # Log training details to Tensorboard.
+                self.writer.add_scalar(
+                    "train/batch_loss",
+                    loss.item(),
+                    epoch_num * len(dataloader) + batch_idx,
+                )
+                self.writer.add_scalar(
+                    "train/batch_perplexity",
+                    torch.exp(loss).item(),
+                    epoch_num * len(dataloader) + batch_idx,
+                )
+                self.writer.add_scalar(
+                    "train/learning_rate",
+                    self.optimizer.param_groups[0]["lr"],
+                    epoch_num * len(dataloader) + batch_idx,
                 )
                 latest_metrics = self.gpu_profiler.get_latest_metrics()
                 if latest_metrics:
@@ -448,25 +448,7 @@ class Agent:
                     self.writer.add_scalar(
                         "GPU/ram_percent", latest_metrics.ram_percent, epoch_num
                     )
-                # Log training details to Tensorboard.
-                self.writer.add_scalar(
-                    "train/batch_loss",
-                    loss.item(),
-                    epoch_num * len(dataloader) + batch_idx,
-                )
-                self.writer.add_scalar(
-                    "train/batch_perplexity",
-                    torch.exp(loss).item(),
-                    epoch_num * len(dataloader) + batch_idx,
-                )
-                self.writer.add_scalar(
-                    "train/learning_rate",
-                    self.optimizer.param_groups[0]["lr"],
-                    epoch_num * len(dataloader) + batch_idx,
-                )
-        # Calculate and return final average loss for epoch.
-        # This is the avg_loss.
-        return total_loss / total_steps
+        return avg_loss
 
     def _val_epoch(
         self, epoch_num: int, dataloader: DattabotDataLoader, num_batches: int
@@ -484,23 +466,21 @@ class Agent:
         with torch.no_grad():
             for batch_idx in progress_bar:
                 batch = next(dataloader)
-                # Unpack the batch - batch is a list of [src_data, tgt_data]
-                src_data, tgt_data = batch[0], batch[1]
-                # Move tensors to device
-                src_data = src_data.to(self.agent_device)
-                tgt_data = tgt_data.to(self.agent_device)
+                input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
+                    self.agent_device
+                )
+                attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
+                    self.agent_device
+                )
                 # Model predicts.
                 # shape: [batch_size, sequence_length, vocab_size]
-                output_logits = self.model(
-                    src_input=src_data, src_mask=None, tgt_input=tgt_data, tgt_mask=None
-                )
+                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = logits.view(-1, tgt_vocab_size)
+                labels = labels.view(-1)
                 # Calculate loss.
-                loss = self.criterion(
-                    # reshape to [batch_size*seq_len, vocab_size]
-                    output_logits.contiguous().view(-1, tgt_vocab_size),
-                    # reshape to [batch_size*seq_len]
-                    tgt_data.view(-1),
-                )
+                loss = self.criterion(logits, labels)
+                padding_mask = labels != self.tokenizer.pad_token_id
+                loss = (loss * padding_mask).sum() / padding_mask.sum()
                 # Update metrics
                 total_loss += loss.item()
                 total_steps += 1
@@ -552,7 +532,11 @@ class Agent:
         """
         if not queries:
             self.logger.warning("No queries provided for inference.")
-            return [DattaBotAPIResponse(query_response="No queries to process.")]
+            return [
+                DattaBotAPIResponse(
+                    response_dict={"output_text": "No queries to process."}
+                )
+            ]
 
         self.model.eval()
         responses: list[DattaBotAPIResponse] = []
@@ -564,9 +548,7 @@ class Agent:
                 self.comm_manager.add_user_message(q)
             # Convert queries to padded tensors
             batch_tensor, _ = self.convert_queries_to_tensors(queries)
-            batch_tensor = batch_tensor.to(
-                dtype=self.tensor_dtype, device=self.agent_device
-            )
+            batch_tensor = batch_tensor.to(device=self.agent_device, dtype=torch.long)
             batch_size, _ = batch_tensor.shape
 
             assert batch_size == len(
@@ -576,10 +558,8 @@ class Agent:
             with torch.no_grad():
                 # shape: (batch_size, seq_len, vocab_size)
                 logits: Tensor = self.model(batch_tensor)
-
                 # Greedy decoding → (batch_size, seq_len)
                 predicted_ids: Tensor = torch.argmax(logits, dim=-1)
-
                 # Decode tokens back into text
                 decoded_responses: list[str] = self.tokenizer.decode(
                     tokens_or_tokens_list=predicted_ids.tolist()
@@ -591,20 +571,24 @@ class Agent:
                 self.comm_manager.add_agent_message(reply_text)
                 responses.append(
                     DattaBotAPIResponse(
-                        query_response=reply_text,
-                        tensor_response=predicted_ids[i],
-                        tokenizer_encodings=batch_tensor[i].tolist(),
-                        tokenizer_decodings=reply_text,
+                        response_dict={"output_text": reply_text},
+                        metadata={
+                            "tensor_response": predicted_ids[i].clone().detach(),
+                            "tokenizer_encodings": batch_tensor[i].tolist(),
+                            "tokenizer_decodings": reply_text,
+                        },
                     )
                 )
 
         except Exception as e:
+            tb_str = traceback.format_exc()
             self.logger.error(f"An error occurred during inference: {e}")
+            self.logger.error(f"Traceback:\n{tb_str}")
             error_msg = (
                 "An error occurred while processing your request. Please try again."
             )
             self.comm_manager.add_agent_message(error_msg)
-            return [DattaBotAPIResponse(query_response=error_msg)]
+            return [DattaBotAPIResponse(response_dict={"output_text": error_msg})]
 
         return responses
 
@@ -617,14 +601,12 @@ class Agent:
             isinstance(r, DattaBotAPIResponse) for r in responses
         ), "All responses must be DattaBotAPIResponse"
         # Log the results
+        self.logger.debug(f"Query Response for first response: {responses[0].text}")
         self.logger.debug(
-            f"Query Response for first response: {responses[0].query_response}"
+            f"Number of Batches for first response: {responses[0].num_train_batches}"
         )
         self.logger.debug(
-            f"Number of Batches for first response: {responses[0].num_batches}"
-        )
-        self.logger.debug(
-            f"Tensor Response for the first response: {responses.tensor_response}"
+            f"Tensor Response for the first response: {responses[0].tensor_response}"
         )
         self.logger.debug(f"Number of responses: {len(responses)}")
         return responses

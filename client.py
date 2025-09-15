@@ -12,7 +12,7 @@ class DattaCommandLineClient:
         responses: list[DattaBotAPIResponse] = self.api.respond_to_queries(
             queries=input_queries
         )
-        return responses[0].query_response
+        return responses[0].text
 
     def run(self) -> None:
         while True:

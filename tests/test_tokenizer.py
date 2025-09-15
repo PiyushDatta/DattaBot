@@ -58,6 +58,17 @@ def test_token_to_id_and_id_to_token(tokenizer):
     assert token_str == special
 
 
+def test_vocab_property(tokenizer):
+    vocab = tokenizer.vocab
+    assert isinstance(vocab, dict)
+    assert len(vocab) == tokenizer.vocab_size
+    # Check that special tokens exist in vocab
+    assert tokenizer.bos_token in vocab
+    assert tokenizer.eos_token in vocab
+    assert vocab[tokenizer.bos_token] == tokenizer.bos_token_id
+    assert vocab[tokenizer.eos_token] == tokenizer.eos_token_id
+
+
 def test_vocab_size_property(tokenizer):
     assert isinstance(tokenizer.vocab_size, int)
     assert tokenizer.vocab_size > 0

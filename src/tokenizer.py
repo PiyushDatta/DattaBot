@@ -135,6 +135,14 @@ class DattaBotTokenizer:
     # --- Token Properties ---
 
     @property
+    def vocab(self) -> dict[str, int]:
+        """
+        Returns the full tokenizer vocabulary as a dictionary: token -> id
+        Includes both special tokens and mergeable ranks.
+        """
+        return {**self._tokenizer._special_tokens, **self._tokenizer._mergeable_ranks}
+
+    @property
     def vocab_size(self) -> int:
         return len(self._tokenizer._mergeable_ranks) + len(
             self._tokenizer._special_tokens
