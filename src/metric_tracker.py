@@ -12,7 +12,6 @@ class MetricTracker:
     _instance: Optional["MetricTracker"] = None
 
     def __new__(cls, *args, **kwargs):
-        # Ensure only one instance exists
         if cls._instance is None:
             cls._instance = super(MetricTracker, cls).__new__(cls)
         return cls._instance
@@ -23,7 +22,6 @@ class MetricTracker:
         run_name: Optional[str] = None,
         log_dir: str = "wandb_logs",
     ):
-        # Prevent re-initialization if already constructed
         if hasattr(self, "_initialized") and self._initialized:
             return
 
@@ -32,6 +30,7 @@ class MetricTracker:
         self.run_name = run_name
         self.log_dir = log_dir
         self.active = False
+        self.global_step = 0  # Track global step internally
 
         os.makedirs(log_dir, exist_ok=True)
 
@@ -43,7 +42,6 @@ class MetricTracker:
                 mode="online" if os.getenv("WANDB_API_KEY") else "offline",
             )
             self.active = True
-            # Use getattr to safely access attributes
             run_name_safe = getattr(wandb.run, "name", "unknown")
             run_mode_safe = getattr(wandb.run, "mode", "unknown")
             self.logger.info(f"W&B run started: {run_name_safe} (mode={run_mode_safe})")
@@ -54,11 +52,15 @@ class MetricTracker:
         self._initialized = True
 
     def log_metrics(self, metrics: Dict, step: Optional[int] = None):
-        """Log a dictionary of metrics to W&B."""
+        """Log a dictionary of metrics to W&B, optionally passing a step."""
         if not self.active:
             return
         try:
+            # If step is None, use internal global step
+            if step is None:
+                step = self.global_step
             wandb.log(metrics, step=step)
+            self.global_step = step + 1
         except Exception as e:
             self.logger.error(f"Error logging metrics to W&B: {e}")
 
