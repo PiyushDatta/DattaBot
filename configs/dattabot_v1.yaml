@@ -18,7 +18,7 @@ agent:
     data_directory: "dattabot_data_dir"
     plot_directory: "dattabot_data_dir/plots"
     batch_size: 16
-    logging_and_plotting_every_x_steps: 100
+    logging_and_plotting_every_x_steps: 20
     validation_save_weights_every_x_batches: 100
     validation_no_save_weights_every_x_batches: 10
     num_batches_train_every_epoch: 64
