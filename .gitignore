@@ -162,3 +162,5 @@ cython_debug/
 
 # Dattabot specific folders
 dattabot_data_dir/
+# Wandb logs
+wandb_logs/

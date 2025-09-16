@@ -110,7 +110,9 @@ def test_data_builder_setup(mock_load_dataset):
     agent_device = torch.device(get_agent_config().env.device)
     builder = DattabotDataBuilder()
     builder.download_dataset = MagicMock(return_value=(train_mock, val_mock))
-    train_loader, val_loader, vocab = builder.setup_data(device_for_generator=agent_device)
+    train_loader, val_loader, vocab = builder.setup_data(
+        device_for_generator=agent_device
+    )
 
     train_batch = next(iter(train_loader))
     x_train, y_train = train_batch

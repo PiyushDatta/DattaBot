@@ -1,4 +1,3 @@
-import csv
 import os
 import time
 from typing import Dict, Optional
@@ -21,9 +20,9 @@ from src.util import get_tensor_dtype_from_config
 from src.logger import get_logger
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
+from src.metric_tracker import MetricTracker, get_metric_tracker
 from torch import nn, Tensor
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
-from torch.utils.tensorboard import SummaryWriter
 
 
 class Agent:
@@ -42,23 +41,17 @@ class Agent:
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
         self.comm_manager = DattaBotCommunicationManager()
         tokenizer_model_name = repr(self.tokenizer)
-        # Things go bad when pad_id is -1.
-        # Pad token is -1, change it to eos token.
-        assert self.tokenizer.pad_token_id != -1, f"Pad id can't be -1."
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
         # Setup data loader.
         self.data_builder = DattabotDataBuilder()
         # Setup model.
         self.model = DattaBotModel()
-        # Batch size.
         self.batch_size = self.config.agent.batch_size
         self.logger.debug(f"Batch size: {self.batch_size}")
-        # Model dimensions.
-        self.model_dimensions = self.config.neural_net.model_dimensions
-        self.logger.debug(f"Model dimensions: {self.model_dimensions}")
-        # Max tokens for response.
-        self.response_max_response_tokens = self.config.agent.max_response_tokens
-        self.logger.debug(f"Max tokens: {self.response_max_response_tokens}")
+        self.logger.debug(
+            f"Model dimensions: {self.config.neural_net.model_dimensions}"
+        )
+        self.logger.debug(f"Max tokens: {self.config.agent.max_response_tokens}")
         # Load model weights
         self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
         self.load_agent(filepath=self.weights_fname)
@@ -71,14 +64,24 @@ class Agent:
         )
         self.train_batch_idx = 0
         self.val_batch_idx = 0
-        self.writer = SummaryWriter(os.path.join(self.data_dir, "runs"))
-        self.logger.info(f"Tensorboard logs will be saved to: {self.writer.log_dir}")
-        self.logger.info(f"View logs with: tensorboard --logdir={self.writer.log_dir}")
-        # GPU profiler
+        # Setup MetricTracker (w&b, tensorboard, or plain csv).
+        self.metric_tracker: MetricTracker = get_metric_tracker(
+            project=f"{self.config.env.env_name}",
+            run_name=f"{self.config.env.env_name}_training_run_{int(time.time())}",
+        )
+        self.metric_tracker.log_config(
+            {
+                "batch_size": self.batch_size,
+                "lr": self.lr,
+                "epochs": self.config.env.training_num_epochs,
+                "model_dims": self.config.neural_net.model_dimensions,
+                "dataset": self.config.env.dataset_name,
+            }
+        )
+        # GPU profiler.
         self.gpu_profiler = BackgroundGPUProfiler(
             device=self.agent_device,
             sample_every_x_seconds=1.0,
-            log_dir=os.path.join(self.data_dir, "gpu_metrics"),
         )
         self.lr_scheduler = TorchOneCycleLR(
             self.optimizer,
@@ -99,6 +102,7 @@ class Agent:
         #     update_freq=1,
         #     epsilon=1e-12
         # )
+        # AMP scaler (for mixed precision).
         self.scaler = None
         # Setup GPU settings/optimizations if we have a GPU.
         if not is_device_cpu(self.agent_device):
@@ -204,12 +208,22 @@ class Agent:
             raise
 
     def new_training_session(self):
+        self.logger.info("Agent's training session has begun...")
+        if self.metric_tracker.active:
+            self.logger.info(
+                f"Training session can be monitored here: {self.metric_tracker.get_run_url()}"
+            )
         self.train_batch_idx = 0
         self.val_batch_idx = 0
         self.gpu_profiler.start()
         mp.set_start_method("spawn", force=True)
 
     def end_training_session(self):
+        self.logger.info("Agent's training session has ended.")
+        if self.metric_tracker.active:
+            self.logger.info(
+                f"Training session can be monitored here: {self.metric_tracker.get_run_url()}"
+            )
         self.train_batch_idx = 0
         self.val_batch_idx = 0
         self.gpu_profiler.stop()
@@ -217,7 +231,6 @@ class Agent:
     def train_agent(self) -> DattaBotAPIResponse:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
         response.text = "Starting training."
-        self.logger.info("Started training")
         train_interrupted = False
         avg_train_loss = 0
         avg_val_loss = 0
@@ -275,10 +288,13 @@ class Agent:
                 self.logger.debug(
                     f"Average validation loss after {num_val_batches_per_phase} batches: {avg_val_loss:.2f}"
                 )
-                self.writer.add_scalars(
-                    "Loss",
-                    {"train": avg_train_loss, "validation": avg_val_loss},
-                    curr_epoch_num,
+                # Log epoch metrics to MetricTracker
+                self.metric_tracker.log_metrics(
+                    {
+                        "train/loss": avg_train_loss,
+                        "val/loss": avg_val_loss,
+                    },
+                    step=curr_epoch_num,
                 )
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
@@ -289,22 +305,31 @@ class Agent:
                     )
                     self.logger.info(f"Best validation loss: {avg_val_loss:.2f}\n")
             # Done training!
-            response.text = (
-                f"Successfully trained on {response.num_train_batches} batches. Validated on {response.num_val_batches} batches."
-                f"View training progress at: tensorboard --logdir={self.writer.log_dir}"
-            )
+            if self.metric_tracker.active:
+                response.text = (
+                    f"Successfully trained on {response.num_train_batches} batches. "
+                    f"Validated on {response.num_val_batches} batches. "
+                    f"View training progress at: {self.metric_tracker.get_run_url()}"
+                )
+            else:
+                response.text = (
+                    f"Successfully trained on {response.num_train_batches} batches. "
+                    f"Validated on {response.num_val_batches} batches."
+                )
         except KeyboardInterrupt:
             # Stopped training because we cancelled it via ctrl+c (KeyboardInterrupt).
             train_interrupted = True
             err_msg = f"Training interrupted by user (ctrl+c)."
             response.text = err_msg
             self.logger.error(err_msg)
+            self.end_training_session()
         except Exception as e:
             err_msg = f"Stopped training! Something unexpected happened: {e}"
             tb_str = traceback.format_exc()
             self.logger.error(err_msg)
             self.logger.error(f"An error occurred during training:\n{tb_str}")
             response.text = err_msg
+            self.end_training_session()
         # Log the training details, including the time taken to train.
         train_end_time = time.time()
         total_training_time = train_end_time - train_start_time
@@ -408,21 +433,14 @@ class Agent:
                         }
                     )
                 )
-                # Log training details to Tensorboard.
-                self.writer.add_scalar(
-                    "train/batch_loss",
-                    loss.item(),
-                    epoch_num * len(dataloader) + batch_idx,
-                )
-                self.writer.add_scalar(
-                    "train/batch_perplexity",
-                    torch.exp(loss).item(),
-                    epoch_num * len(dataloader) + batch_idx,
-                )
-                self.writer.add_scalar(
-                    "train/learning_rate",
-                    self.optimizer.param_groups[0]["lr"],
-                    epoch_num * len(dataloader) + batch_idx,
+                # Log metrics using MetricTracker
+                self.metric_tracker.log_metrics(
+                    {
+                        "train/batch_loss": loss.item(),
+                        "train/batch_perplexity": torch.exp(loss).item(),
+                        "train/learning_rate": self.optimizer.param_groups[0]["lr"],
+                    },
+                    step=epoch_num * len(dataloader) + batch_idx,
                 )
                 latest_metrics = self.gpu_profiler.get_latest_metrics()
                 if latest_metrics:
@@ -432,21 +450,6 @@ class Agent:
                         f"Utilization: {latest_metrics.utilization}%, "
                         f"CPU Usage: {latest_metrics.cpu_percent}%, "
                         f"RAM Usage: {latest_metrics.ram_percent}%"
-                    )
-                    # Log the GPU metrics to TensorBoard.
-                    self.writer.add_scalar(
-                        "GPU/memory_allocated_mb",
-                        latest_metrics.memory_allocated,
-                        epoch_num,
-                    )
-                    self.writer.add_scalar(
-                        "GPU/utilization_percent", latest_metrics.utilization, epoch_num
-                    )
-                    self.writer.add_scalar(
-                        "GPU/cpu_percent", latest_metrics.cpu_percent, epoch_num
-                    )
-                    self.writer.add_scalar(
-                        "GPU/ram_percent", latest_metrics.ram_percent, epoch_num
                     )
         return avg_loss
 
@@ -481,36 +484,26 @@ class Agent:
                 loss = self.criterion(logits, labels)
                 padding_mask = labels != self.tokenizer.pad_token_id
                 loss = (loss * padding_mask).sum() / padding_mask.sum()
-                # Update metrics
                 total_loss += loss.item()
                 total_steps += 1
                 avg_loss = total_loss / total_steps
                 perplexity = torch.exp(torch.tensor(avg_loss))
-                # Log batch metrics to TensorBoard
-                self.writer.add_scalar(
-                    "validation/batch_loss",
-                    loss.item(),
-                    batch_idx + (epoch_num * num_batches),
-                )
-                self.writer.add_scalar(
-                    "validation/batch_perplexity",
-                    perplexity.item(),
-                    batch_idx + (epoch_num * num_batches),
-                )
-                # Update progress bar
+                # Update progress bar.
                 progress_bar.set_postfix(
                     {
                         "val_loss": avg_loss,
                         "val_perplexity": perplexity.item(),
                     }
                 )
-                # Log validation metrics to tensorboard.
-                self.writer.add_scalar("validation/loss", avg_loss, epoch_num)
-                self.writer.add_scalar(
-                    "validation/perplexity",
-                    torch.exp(torch.tensor(avg_loss)).item(),
-                    epoch_num,
+                # Log validation batch metrics.
+                self.metric_tracker.log_metrics(
+                    {
+                        "val/batch_loss": loss.item(),
+                        "val/batch_perplexity": perplexity.item(),
+                    },
+                    step=batch_idx + (epoch_num * num_batches),
                 )
+        # Log epoch summary.
         self.logger.info(
             f"Logging every validation, current epoch {epoch_num}:\n"
             + str(
@@ -520,6 +513,14 @@ class Agent:
                 }
             )
         )
+        self.metric_tracker.log_metrics(
+            {
+                "val/loss": avg_loss,
+                "val/perplexity": perplexity.item(),
+            },
+            step=epoch_num,
+        )
+
         return avg_loss
 
     def _inference(self, queries: list[str]) -> list[DattaBotAPIResponse]:
@@ -624,52 +625,34 @@ class Agent:
         total_params_millions: int,
         interrupted=False,
     ):
-        # Create the directory if it doesn't exist
-        log_file_path = "training_log.csv"
-        # Create or open the log file and write the training details in CSV format.
-        with open(log_file_path, "a", newline="") as log_file:
-            writer = csv.writer(log_file)
-            gpu_name, total_memory, total_cores = self._get_gpu_info()
-            # Write header if the file is empty
-            if log_file.tell() == 0:
-                writer.writerow(
-                    [
-                        "Model Name",
-                        "Dataset Name",
-                        "Vocab Length",
-                        "Batch Size",
-                        "Training Batches Completed",
-                        "Validation Batches Completed",
-                        "Training Score",
-                        "Validation Score",
-                        "Total model parameters (millions)",
-                        "Training Time (s)",
-                        "Gpu Name",
-                        "Total GPU Memory (MB)",
-                        "Total GPU Cores",
-                        "Interrupted",
-                    ]
-                )
-            # Write the training details.
-            writer.writerow(
-                [
-                    model_name,
-                    dataset_name,
-                    len(vocab),
-                    self.batch_size,
-                    num_train_batches,
-                    num_val_batches,
-                    training_score,
-                    validation_score,
-                    total_params_millions,
-                    total_training_time,
-                    gpu_name,
-                    total_memory,
-                    total_cores,
-                    interrupted,
-                ]
+        """Log final training summary using MetricTracker (W&B or other backend)."""
+        gpu_name, total_memory, total_cores = self._get_gpu_info()
+
+        if self.metric_tracker.active:
+            self.metric_tracker.log_metrics(
+                {
+                    "summary/model_name": model_name,
+                    "summary/dataset_name": dataset_name,
+                    "summary/vocab_length": len(vocab),
+                    "summary/batch_size": self.batch_size,
+                    "summary/train_batches_completed": num_train_batches,
+                    "summary/val_batches_completed": num_val_batches,
+                    "summary/train_loss": training_score,
+                    "summary/val_loss": validation_score,
+                    "summary/total_params_millions": total_params_millions,
+                    "summary/training_time_s": total_training_time,
+                    "summary/gpu_name": gpu_name,
+                    "summary/gpu_memory_MB": total_memory,
+                    "summary/gpu_cores": total_cores,
+                    "summary/interrupted": interrupted,
+                },
+                # Run-level summary, not per step
+                step=None,
             )
-        self.logger.info(f"Training details logged to {log_file_path}")
+
+        self.logger.info(
+            f"Training summary logged to MetricTracker for model '{model_name}' on dataset '{dataset_name}'."
+        )
 
     def convert_queries_to_tensors(self, queries: list[str]) -> tuple[Tensor, int]:
         """

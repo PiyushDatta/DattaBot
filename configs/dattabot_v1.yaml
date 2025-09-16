@@ -7,7 +7,6 @@ neural_net:
 agent:
     max_response_tokens: 512
     input_block_size: 256
-    batch_size: 16
     max_grad_norm: 1.0
     gamma: 0.99
     tau: 0.005
@@ -18,17 +17,17 @@ agent:
     weight_decay: 0.1
     data_directory: "dattabot_data_dir"
     plot_directory: "dattabot_data_dir/plots"
+    batch_size: 16
     logging_and_plotting_every_x_steps: 100
     validation_save_weights_every_x_batches: 100
     validation_no_save_weights_every_x_batches: 10
-    num_batches_train_every_epoch: 4096
-    num_batches_val_every_epoch: 256
+    num_batches_train_every_epoch: 64
+    num_batches_val_every_epoch: 10
 env:
-    env_name: "DattaBot"
+    env_name: "DattaBotV1"
     device: "cuda"
     num_update_target: 1
     num_save_weights: 50
-    batch_size: 128
     train: true
     plot_training: false
     training_episodes: 1000

@@ -18,7 +18,7 @@ def test_agent_action_enum():
         AgentAction.GET_DECODINGS_FOR_QUERIES,
         AgentAction.GET_ENCODED_TENSORS_FOR_QUERIES,
         AgentAction.TRAIN_AGENT,
-        AgentAction.NO_ACTION_END
+        AgentAction.NO_ACTION_END,
     ]
 
 
@@ -99,14 +99,14 @@ def test_datta_bot_api_response_init_with_data():
     response_dict = {
         "output_text": "Pre-filled text",
         "choices": [{"text": "Choice A"}],
-        "usage": {"tokens": 42}
+        "usage": {"tokens": 42},
     }
     metadata = {
         "tensor_response": ones(1, 1),
         "num_train_batches": 2,
         "num_val_batches": 1,
         "tokenizer_encodings": [[1, 2]],
-        "tokenizer_decodings": ["pre", "filled"]
+        "tokenizer_decodings": ["pre", "filled"],
     }
 
     resp = DattaBotAPIResponse(response_dict=response_dict, metadata=metadata)
