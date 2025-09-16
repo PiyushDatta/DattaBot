@@ -107,6 +107,7 @@ class Agent:
         # Setup GPU settings/optimizations if we have a GPU.
         if not is_device_cpu(self.agent_device):
             self.setup_gpu_settings()
+        self.global_step = 0
 
     @property
     def tokenizer_obj(self):
@@ -217,6 +218,7 @@ class Agent:
         self.val_batch_idx = 0
         self.gpu_profiler.start()
         mp.set_start_method("spawn", force=True)
+        self.global_step = 0
 
     def end_training_session(self):
         self.logger.info("Agent's training session has ended.")
@@ -227,6 +229,7 @@ class Agent:
         self.train_batch_idx = 0
         self.val_batch_idx = 0
         self.gpu_profiler.stop()
+        self.global_step = 0
 
     def train_agent(self) -> DattaBotAPIResponse:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
@@ -412,6 +415,7 @@ class Agent:
                 self.lr_scheduler.step()
             # Update metrics
             total_loss += loss.item()
+            self.global_step += 1
             total_steps += 1
             avg_loss = total_loss / total_steps
             # Update progress bar
@@ -421,11 +425,12 @@ class Agent:
                     "perplexity": torch.exp(torch.tensor(avg_loss)),
                 }
             )
-            if total_steps % log_and_plot_every_x_steps == 0:
+            if self.global_step % log_and_plot_every_x_steps == 0:
                 self.logger.info(
                     f"Logging every {log_and_plot_every_x_steps} steps:\n"
                     + str(
                         {
+                            "global step": self.global_step,
                             "epoch": epoch_num,
                             "train/loss": loss.item(),
                             "train/perplexity": torch.exp(loss).item(),
@@ -440,7 +445,7 @@ class Agent:
                         "train/batch_perplexity": torch.exp(loss).item(),
                         "train/learning_rate": self.optimizer.param_groups[0]["lr"],
                     },
-                    step=epoch_num * len(dataloader) + batch_idx,
+                    step=self.global_step,
                 )
                 latest_metrics = self.gpu_profiler.get_latest_metrics()
                 if latest_metrics:
@@ -501,7 +506,7 @@ class Agent:
                         "val/batch_loss": loss.item(),
                         "val/batch_perplexity": perplexity.item(),
                     },
-                    step=batch_idx + (epoch_num * num_batches),
+                    step=self.global_step,
                 )
         # Log epoch summary.
         self.logger.info(
