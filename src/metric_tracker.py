@@ -30,7 +30,6 @@ class MetricTracker:
         self.run_name = run_name
         self.log_dir = log_dir
         self.active = False
-        self.global_step = 0  # Track global step internally
 
         os.makedirs(log_dir, exist_ok=True)
 
@@ -56,11 +55,7 @@ class MetricTracker:
         if not self.active:
             return
         try:
-            # If step is None, use internal global step
-            if step is None:
-                step = self.global_step
             wandb.log(metrics, step=step)
-            self.global_step = step + 1
         except Exception as e:
             self.logger.error(f"Error logging metrics to W&B: {e}")
 

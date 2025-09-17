@@ -107,8 +107,6 @@ class Agent:
         # Setup GPU settings/optimizations if we have a GPU.
         if not is_device_cpu(self.agent_device):
             self.setup_gpu_settings()
-        self.train_global_step = 0
-        self.val_global_step = 0
 
     @property
     def tokenizer_obj(self):
@@ -219,8 +217,6 @@ class Agent:
         self.val_batch_idx = 0
         self.gpu_profiler.start()
         mp.set_start_method("spawn", force=True)
-        self.train_global_step = 0
-        self.val_global_step = 0
 
     def end_training_session(self):
         self.logger.info("Agent's training session has ended.")
@@ -231,8 +227,6 @@ class Agent:
         self.train_batch_idx = 0
         self.val_batch_idx = 0
         self.gpu_profiler.stop()
-        self.train_global_step = 0
-        self.val_global_step = 0
 
     def train_agent(self) -> DattaBotAPIResponse:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
@@ -300,7 +294,7 @@ class Agent:
                         "train/loss": avg_train_loss,
                         "val/loss": avg_val_loss,
                     },
-                    step=self.train_global_step,
+                    step=None,
                 )
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
@@ -372,7 +366,7 @@ class Agent:
             range(num_batches), desc=f"Training for epoch {epoch_num}", leave=True
         )
         # Go through all the batches.
-        for batch_idx in progress_bar:
+        for _ in progress_bar:
             batch = next(dataloader)
             # [batch, seq_len]
             input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
@@ -418,7 +412,6 @@ class Agent:
                 self.lr_scheduler.step()
             # Update metrics
             total_loss += loss.item()
-            self.train_global_step += 1
             total_steps += 1
             avg_loss = total_loss / total_steps
             # Update progress bar
@@ -428,27 +421,27 @@ class Agent:
                     "perplexity": torch.exp(torch.tensor(avg_loss)),
                 }
             )
-            if self.train_global_step % log_and_plot_every_x_steps == 0:
+            # Log metrics using MetricTracker
+            self.metric_tracker.log_metrics(
+                {
+                    "train/batch_loss": loss.item(),
+                    "train/batch_perplexity": torch.exp(loss).item(),
+                    "train/learning_rate": self.optimizer.param_groups[0]["lr"],
+                },
+                step=None,
+            )
+            if total_steps % log_and_plot_every_x_steps == 0:
                 self.logger.info(
                     f"Logging every {log_and_plot_every_x_steps} steps:\n"
                     + str(
                         {
-                            "global step": self.train_global_step,
+                            "global step": total_steps,
                             "epoch": epoch_num,
                             "train/loss": loss.item(),
                             "train/perplexity": torch.exp(loss).item(),
                             "train/learning_rate": self.optimizer.param_groups[0]["lr"],
                         }
                     )
-                )
-                # Log metrics using MetricTracker
-                self.metric_tracker.log_metrics(
-                    {
-                        "train/batch_loss": loss.item(),
-                        "train/batch_perplexity": torch.exp(loss).item(),
-                        "train/learning_rate": self.optimizer.param_groups[0]["lr"],
-                    },
-                    step=self.train_global_step,
                 )
                 latest_metrics = self.gpu_profiler.get_latest_metrics()
                 if latest_metrics:
@@ -494,7 +487,6 @@ class Agent:
                 loss = (loss * padding_mask).sum() / padding_mask.sum()
                 total_loss += loss.item()
                 total_steps += 1
-                self.val_global_step += 1
                 avg_loss = total_loss / total_steps
                 perplexity = torch.exp(torch.tensor(avg_loss))
                 # Update progress bar.
@@ -510,7 +502,7 @@ class Agent:
                         "val/batch_loss": loss.item(),
                         "val/batch_perplexity": perplexity.item(),
                     },
-                    step=self.val_global_step,
+                    step=None,
                 )
         # Log epoch summary.
         self.logger.info(
@@ -527,7 +519,7 @@ class Agent:
                 "val/loss": avg_loss,
                 "val/perplexity": perplexity.item(),
             },
-            step=self.val_global_step,
+            step=None,
         )
 
         return avg_loss
