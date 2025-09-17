@@ -130,7 +130,7 @@ class BackgroundGPUProfiler:
                         "system/cpu_percent": metrics.cpu_percent,
                         "system/ram_percent": metrics.ram_percent,
                     },
-                    step=int(metrics.timestamp),
+                    step=None,
                 )
 
                 # Store in queue for programmatic access
