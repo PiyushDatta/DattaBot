@@ -2,10 +2,11 @@ import os
 import time
 from typing import Dict, Optional
 import traceback
-import matplotlib.pyplot as plt
 import torch
 import torch.cuda.amp as amp
 import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
 import tqdm
 from src.communication_mgr import DattaBotCommunicationManager
 from src.agent_config import get_agent_config
@@ -116,6 +117,29 @@ class Agent:
         """
         return self.tokenizer
 
+    def _is_rank_0(self):
+        return (
+            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+        )
+
+    def setup_distributed(self):
+        # Ensure this is running under torchrun.
+        assert "LOCAL_RANK" in os.environ, (
+            "LOCAL_RANK environment variable not found. "
+            "You must run using `torchrun --nproc_per_node=N ...` for distributed training. See README for more information."
+        )
+        local_rank = int(os.environ["LOCAL_RANK"])
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        self.agent_device = torch.device(f"cuda:{local_rank}")
+        self.model.to(self.agent_device)
+        self.model = nn.parallel.DistributedDataParallel(
+            self.model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+        )
+        self.model.cuda()
+
     def setup_gpu_settings(self):
         # Initialize AMP scaler
         self.scaler = amp.GradScaler()
@@ -128,8 +152,7 @@ class Agent:
         # Move model to GPU earlier and optimize
         self.model = self.model.to(self.agent_device)
         if torch.cuda.device_count() > 1:
-            self.model = nn.DataParallel(self.model)
-            self.model.cuda()
+            self.setup_distributed()
 
     def save_agent(self, filepath: str) -> None:
         """
@@ -265,9 +288,15 @@ class Agent:
             )
             for epoch in range(self.config.env.training_num_epochs):
                 curr_epoch_num = epoch + 1
-                self.logger.debug(
-                    f"\nEpoch {curr_epoch_num}/{self.config.env.training_num_epochs}"
-                )
+                if self._is_rank_0():
+                    self.logger.debug(
+                        f"\nEpoch {curr_epoch_num}/{self.config.env.training_num_epochs}"
+                    )
+                # Tell DistributedSampler to shuffle differently this epoch.
+                if isinstance(train_dataloader.sampler, DistributedSampler):
+                    train_dataloader.sampler.set_epoch(curr_epoch_num)
+                if isinstance(val_dataloader.sampler, DistributedSampler):
+                    val_dataloader.sampler.set_epoch(curr_epoch_num)
                 # Perform training phase
                 avg_train_loss = self._train_epoch(
                     epoch_num=curr_epoch_num,
@@ -275,9 +304,10 @@ class Agent:
                     num_batches=num_train_batches_per_phase,
                 )
                 response.num_train_batches += num_train_batches_per_phase
-                self.logger.debug(
-                    f"Average train loss after {num_train_batches_per_phase} batches: {avg_train_loss:.2f}"
-                )
+                if self._is_rank_0():
+                    self.logger.debug(
+                        f"Average train loss after {num_train_batches_per_phase} batches: {avg_train_loss:.2f}"
+                    )
                 # Validate.
                 avg_val_loss = self._val_epoch(
                     epoch_num=curr_epoch_num,
@@ -285,21 +315,23 @@ class Agent:
                     num_batches=num_val_batches_per_phase,
                 )
                 response.num_val_batches += num_val_batches_per_phase
-                self.logger.debug(
-                    f"Average validation loss after {num_val_batches_per_phase} batches: {avg_val_loss:.2f}"
-                )
-                # Log epoch metrics to MetricTracker
-                self.metric_tracker.log_metrics(
-                    {
-                        "train/loss": avg_train_loss,
-                        "val/loss": avg_val_loss,
-                    },
-                    step=None,
-                )
+                if self._is_rank_0():
+                    self.logger.debug(
+                        f"Average validation loss after {num_val_batches_per_phase} batches: {avg_val_loss:.2f}"
+                    )
+                    # Log epoch metrics to MetricTracker
+                    self.metric_tracker.log_metrics(
+                        {
+                            "train/loss": avg_train_loss,
+                            "val/loss": avg_val_loss,
+                        },
+                        step=None,
+                    )
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
-                    self.save_agent(filepath=self.weights_fname)
-                    self.logger.info("New best model saved!")
+                    if self._is_rank_0():
+                        self.save_agent(filepath=self.weights_fname)
+                        self.logger.info("New best model saved!")
                     self.logger.info(
                         f"Epoch {curr_epoch_num}/{self.config.env.training_num_epochs}"
                     )
@@ -422,36 +454,46 @@ class Agent:
                 }
             )
             # Log metrics using MetricTracker
-            self.metric_tracker.log_metrics(
-                {
-                    "train/batch_loss": loss.item(),
-                    "train/batch_perplexity": torch.exp(loss).item(),
-                    "train/learning_rate": self.optimizer.param_groups[0]["lr"],
-                },
-                step=None,
-            )
-            if total_steps % log_and_plot_every_x_steps == 0:
-                self.logger.info(
-                    f"Logging every {log_and_plot_every_x_steps} steps:\n"
-                    + str(
-                        {
-                            "global step": total_steps,
-                            "epoch": epoch_num,
-                            "train/loss": loss.item(),
-                            "train/perplexity": torch.exp(loss).item(),
-                            "train/learning_rate": self.optimizer.param_groups[0]["lr"],
-                        }
-                    )
+            if self._is_rank_0():
+                self.metric_tracker.log_metrics(
+                    {
+                        "train/batch_loss": loss.item(),
+                        "train/batch_perplexity": torch.exp(loss).item(),
+                        "train/learning_rate": self.optimizer.param_groups[0]["lr"],
+                    },
+                    step=None,
                 )
-                latest_metrics = self.gpu_profiler.get_latest_metrics()
-                if latest_metrics:
+                if total_steps % log_and_plot_every_x_steps == 0:
                     self.logger.info(
-                        f"Epoch {epoch_num} GPU Metrics - "
-                        f"Memory Allocated: {latest_metrics.memory_allocated} MB, "
-                        f"Utilization: {latest_metrics.utilization}%, "
-                        f"CPU Usage: {latest_metrics.cpu_percent}%, "
-                        f"RAM Usage: {latest_metrics.ram_percent}%"
+                        f"Logging every {log_and_plot_every_x_steps} steps:\n"
+                        + str(
+                            {
+                                "global step": total_steps,
+                                "epoch": epoch_num,
+                                "train/loss": loss.item(),
+                                "train/perplexity": torch.exp(loss).item(),
+                                "train/learning_rate": self.optimizer.param_groups[0][
+                                    "lr"
+                                ],
+                            }
+                        )
                     )
+                    latest_metrics = self.gpu_profiler.get_latest_metrics()
+                    if latest_metrics:
+                        self.logger.info(
+                            f"Epoch {epoch_num} GPU Metrics - "
+                            f"Memory Allocated: {latest_metrics.memory_allocated} MB, "
+                            f"Utilization: {latest_metrics.utilization}%, "
+                            f"CPU Usage: {latest_metrics.cpu_percent}%, "
+                            f"RAM Usage: {latest_metrics.ram_percent}%"
+                        )
+        # Sync loss across all ranks.
+        if dist.is_available() and dist.is_initialized():
+            loss_tensor = torch.tensor(
+                [total_loss, total_steps], device=self.agent_device
+            )
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            total_loss, total_steps = loss_tensor.tolist()
         return avg_loss
 
     def _val_epoch(
@@ -496,31 +538,40 @@ class Agent:
                         "val_perplexity": perplexity.item(),
                     }
                 )
-                # Log validation batch metrics.
-                self.metric_tracker.log_metrics(
+                if self._is_rank_0():
+                    # Log validation batch metrics.
+                    self.metric_tracker.log_metrics(
+                        {
+                            "val/batch_loss": loss.item(),
+                            "val/batch_perplexity": perplexity.item(),
+                        },
+                        step=None,
+                    )
+        # Sync loss across all ranks.
+        if dist.is_available() and dist.is_initialized():
+            loss_tensor = torch.tensor(
+                [total_loss, total_steps], device=self.agent_device
+            )
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            total_loss, total_steps = loss_tensor.tolist()
+        # Log epoch summary if rank 0.
+        if self._is_rank_0():
+            self.logger.info(
+                f"Logging every validation, current epoch {epoch_num}:\n"
+                + str(
                     {
-                        "val/batch_loss": loss.item(),
-                        "val/batch_perplexity": perplexity.item(),
-                    },
-                    step=None,
+                        "val/loss": avg_loss,
+                        "val/perplexity": torch.exp(torch.tensor(avg_loss)).item(),
+                    }
                 )
-        # Log epoch summary.
-        self.logger.info(
-            f"Logging every validation, current epoch {epoch_num}:\n"
-            + str(
+            )
+            self.metric_tracker.log_metrics(
                 {
                     "val/loss": avg_loss,
-                    "val/perplexity": torch.exp(torch.tensor(avg_loss)).item(),
-                }
+                    "val/perplexity": perplexity.item(),
+                },
+                step=None,
             )
-        )
-        self.metric_tracker.log_metrics(
-            {
-                "val/loss": avg_loss,
-                "val/perplexity": perplexity.item(),
-            },
-            step=None,
-        )
 
         return avg_loss
 

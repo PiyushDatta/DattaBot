@@ -5,7 +5,9 @@ from typing import Iterator, Optional, Union
 import torch
 from datasets import load_dataset
 from torch import Tensor
+import torch.distributed as dist
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 from src.agent_config import get_agent_config
 from src.logger import get_logger
@@ -124,6 +126,12 @@ class DattabotDataBuilder:
         self.logger.info("Using pretrained tokenizer vocab...")
         return self.tokenizer.vocab
 
+    def get_distributed_sampler(self, dataset, shuffle: bool):
+        """Return a DistributedSampler if in DDP, otherwise None."""
+        if dist.is_available() and dist.is_initialized():
+            return DistributedSampler(dataset, shuffle=shuffle)
+        return None
+
     def setup_data(self, device_for_generator: str = "cpu"):
         """
         Build PyTorch DataLoaders for training and validation.
@@ -140,18 +148,24 @@ class DattabotDataBuilder:
         val_dataset = TextDataset(
             val_data, tokenizer=self.tokenizer, seq_length=self.seq_len
         )
+        # Distributed samplers.
+        train_sampler = self.get_distributed_sampler(train_dataset, shuffle=True)
+        val_sampler = self.get_distributed_sampler(val_dataset, shuffle=False)
 
         train_loader = DattabotDataLoader(
             dataset=train_dataset,
             dataset_name=self.dataset_name,
             batch_size=self.batch_size,
-            shuffle=True,
+            sampler=train_sampler,
+            # Only shuffle if not distributed
+            shuffle=(train_sampler is None),
             generator=torch.Generator(device=device_for_generator).manual_seed(42),
         )
         val_loader = DattabotDataLoader(
             dataset=val_dataset,
             dataset_name=self.dataset_name,
             batch_size=self.batch_size,
+            sampler=val_sampler,
             shuffle=False,
         )
         return train_loader, val_loader, vocab

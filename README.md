@@ -50,7 +50,15 @@ Examples:
 
 -   `python api_example.py --api_cmd "get_encoding" --api_args "hi there"`
 -   `python api_example.py --api_cmd "respond_to_queries" --api_args "hello there"`
+
+Single GPU/CPU Training
+
 -   `python api_example.py --api_cmd "train_agent"`
+
+Multi (distributed) GPU Training
+
+-   `torchrun --nproc_per_node=<REPLACE WITH NUMBER OF GPUS> api_example.py --api_cmd "train_agent"`
+-   `torchrun --nproc_per_node=4 api_example.py --api_cmd "train_agent"`
 
 # Dependencies
 

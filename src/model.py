@@ -9,7 +9,7 @@ from torch import (
 )
 from math import sqrt
 from numpy import sqrt as np_sqrt
-from src.tokenizer import get_tokenizer, DattaBotTokenizer
+from src.tokenizer import get_tokenizer
 from src.logger import get_logger
 from src.agent_config import get_agent_config
 

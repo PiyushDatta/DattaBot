@@ -2,6 +2,7 @@ import os
 from typing import Dict, Optional
 import wandb
 from src.logger import get_logger
+import torch.distributed as dist
 
 
 class MetricTracker:
@@ -55,7 +56,12 @@ class MetricTracker:
         if not self.active:
             return
         try:
-            wandb.log(metrics, step=step)
+            if (
+                not dist.is_available()
+                or not dist.is_initialized()
+                or dist.get_rank() == 0
+            ):
+                wandb.log(metrics, step=step)
         except Exception as e:
             self.logger.error(f"Error logging metrics to W&B: {e}")
 
