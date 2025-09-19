@@ -10,6 +10,7 @@ import torch.multiprocessing as mp
 import tqdm
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
+from src.checkpointing import load_agent, save_agent
 from src.communication_mgr import DattaBotCommunicationManager
 from src.data_loader import DattabotDataBuilder, DattabotDataLoader
 
@@ -21,7 +22,6 @@ from src.metric_tracker import get_metric_tracker, MetricTracker
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
 from src.util import get_tensor_dtype_from_config, is_device_cpu
-from src.checkpointing import save_agent, load_agent
 
 from torch import nn, Tensor
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
@@ -56,6 +56,9 @@ class Agent:
         # Setup model.
         self.model = DattaBotModel(device=self.agent_device)
         self.logger.info(f"Model dimensions: {self.config.neural_net.model_dimensions}")
+        self.logger.info(
+            f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
+        )
         # Load the model to our device.
         self.model = self.model.to(self.agent_device)
         # Load model weights

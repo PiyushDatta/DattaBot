@@ -26,7 +26,11 @@ For manual: Use `--help`, like so: `python run.py --help`
 
 # How to run unit tests
 
-`python run.py --test`, specific test: `python run.py --test test_smoke_test.py`
+`python run.py --test`
+
+# How to run a specific unit test
+
+`python run.py --test test_smoke_test.py`
 
 # How to test api
 
