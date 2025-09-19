@@ -55,9 +55,7 @@ class Agent:
         self.data_builder = DattabotDataBuilder()
         # Setup model.
         self.model = DattaBotModel(device=self.agent_device)
-        self.logger.debug(
-            f"Model dimensions: {self.config.neural_net.model_dimensions}"
-        )
+        self.logger.info(f"Model dimensions: {self.config.neural_net.model_dimensions}")
         # Load the model to our device.
         self.model = self.model.to(self.agent_device)
         # Load model weights
