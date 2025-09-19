@@ -20,8 +20,9 @@ from src.logger import get_logger
 from src.metric_tracker import get_metric_tracker, MetricTracker
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
-
 from src.util import get_tensor_dtype_from_config, is_device_cpu
+from src.checkpointing import save_agent, load_agent
+
 from torch import nn, Tensor
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
 from torch.utils.data.distributed import DistributedSampler
@@ -59,6 +60,14 @@ class Agent:
         )
         # Load the model to our device.
         self.model = self.model.to(self.agent_device)
+        # Load model weights
+        self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
+        load_agent(
+            model=self.model,
+            filepath=self.weights_fname,
+            logger=self.logger,
+        )
+        # Wrap with distributed layer if we have multiple gpus.
         if torch.cuda.device_count() > 1:
             self.model = nn.parallel.DistributedDataParallel(
                 self.model,
@@ -66,9 +75,6 @@ class Agent:
                 output_device=self.local_rank,
             )
         self.model.cuda()
-        # Load model weights
-        self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
-        self.load_agent(filepath=self.weights_fname)
         # Setup training objects.
         self.batch_size = self.config.agent.batch_size
         self.logger.debug(f"Batch size: {self.batch_size}")
@@ -140,100 +146,6 @@ class Agent:
         return (
             not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
         )
-
-    def save_agent(self, filepath: str) -> None:
-        """
-        Save model weights and optional metadata.
-
-        Args:
-            filepath: Path to save the weights
-        """
-        try:
-            # Only create directory if filepath contains a directory path
-            directory = os.path.dirname(filepath)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-            # Save with temporary file to prevent corruption
-            temp_filepath = "tmp_delete_after_" + filepath
-            # Unwrap model if it's wrapped in DP or DDP
-            save_dict = self.model.state_dict()
-            if isinstance(
-                self.model,
-                (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel),
-            ):
-                save_dict = self.model.module.state_dict()
-            torch.save(save_dict, temp_filepath)
-            # Atomic rename
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            os.rename(temp_filepath, filepath)
-            self.logger.info(f"Model weights successfully saved to {filepath}")
-        except Exception as e:
-            self.logger.error(f"Error saving model weights: {str(e)}")
-            # We return because we currently do not care if weights fail to save.
-            # TODO(PiyushDatta): Fix me at some point though, this is not good.
-            return
-
-    def load_agent(
-        self, filepath: str, strict: bool = True, device: Optional[str] = None
-    ) -> Dict:
-        """
-        Load model weights and return metadata.
-
-        Args:
-            filepath: Path to the weights file
-            strict: Whether to enforce strict state dict loading
-            device: Optional device to load weights to (defaults to model's current device)
-
-        Returns:
-            Dictionary containing any metadata saved with the weights
-        """
-        try:
-            if not os.path.exists(filepath):
-                self.logger.info(
-                    f"No model weights found, was looking to load weights from: {filepath}"
-                )
-                return {}
-            # Load weights
-            self.logger.info(f"Model weights found at {filepath}, loading weights...")
-            checkpoint = torch.load(filepath, map_location=self.agent_device)
-            # Handle structured vs direct state dict
-            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-                # Load from structured checkpoint
-                state_dict = checkpoint["model_state_dict"]
-                metadata = checkpoint.get("metadata", {})
-            else:
-                # Direct state dict loading
-                state_dict = checkpoint
-                metadata = {}
-
-            # Strip 'module.' prefix if present
-            if any(k.startswith("module.") for k in state_dict.keys()):
-                self.logger.info(
-                    "Detected DataParallel/DistributedDataParallel checkpoint, "
-                    "removing 'module.' prefixes from keys..."
-                )
-                state_dict = {
-                    k[len("module.") :] if k.startswith("module.") else k: v
-                    for k, v in state_dict.items()
-                }
-
-            # Load into model
-            incompatible_keys = self.model.load_state_dict(state_dict, strict=strict)
-
-            if incompatible_keys.missing_keys or incompatible_keys.unexpected_keys:
-                self.logger.warning(
-                    f"Weight loading had incompatible keys:\n"
-                    f"Missing keys: {incompatible_keys.missing_keys}\n"
-                    f"Unexpected keys: {incompatible_keys.unexpected_keys}"
-                )
-
-            self.logger.info(f"Model weights successfully loaded from {filepath}")
-            return metadata
-
-        except Exception as e:
-            self.logger.error(f"Error loading model weights: {str(e)}")
-            raise
 
     def new_training_session(self):
         self.logger.info("Agent's training session has begun...")
@@ -353,7 +265,11 @@ class Agent:
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     if self._is_rank_0():
-                        self.save_agent(filepath=self.weights_fname)
+                        save_agent(
+                            model=self.model,
+                            filepath=self.weights_fname,
+                            logger=self.logger,
+                        )
                         self.logger.info("New best model saved!")
                     self.logger.info(
                         f"Epoch {curr_epoch_num}/{self.config.env.training_num_epochs}"
