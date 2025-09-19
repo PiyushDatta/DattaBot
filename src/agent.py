@@ -197,6 +197,7 @@ class Agent:
             # Load weights
             self.logger.info(f"Model weights found at {filepath}, loading weights...")
             checkpoint = torch.load(filepath, map_location=self.agent_device)
+            # Handle structured vs direct state dict
             if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
                 # Load from structured checkpoint
                 state_dict = checkpoint["model_state_dict"]
@@ -206,7 +207,18 @@ class Agent:
                 state_dict = checkpoint
                 metadata = {}
 
-            # Load weights into model
+            # Strip 'module.' prefix if present
+            if any(k.startswith("module.") for k in state_dict.keys()):
+                self.logger.info(
+                    "Detected DataParallel/DistributedDataParallel checkpoint, "
+                    "removing 'module.' prefixes from keys..."
+                )
+                state_dict = {
+                    k[len("module.") :] if k.startswith("module.") else k: v
+                    for k, v in state_dict.items()
+                }
+
+            # Load into model
             incompatible_keys = self.model.load_state_dict(state_dict, strict=strict)
 
             if incompatible_keys.missing_keys or incompatible_keys.unexpected_keys:
