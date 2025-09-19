@@ -155,7 +155,13 @@ class Agent:
                 os.makedirs(directory, exist_ok=True)
             # Save with temporary file to prevent corruption
             temp_filepath = "tmp_delete_after_" + filepath
+            # Unwrap model if it's wrapped in DP or DDP
             save_dict = self.model.state_dict()
+            if isinstance(
+                self.model,
+                (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel),
+            ):
+                save_dict = self.model.module.state_dict()
             torch.save(save_dict, temp_filepath)
             # Atomic rename
             if os.path.exists(filepath):
