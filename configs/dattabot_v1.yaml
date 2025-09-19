@@ -5,7 +5,7 @@ neural_net:
     hidden_layers: 2048
     zeroed_drop_probability: 0.1
 agent:
-    max_response_tokens: 512
+    max_response_tokens: 1024
     input_block_size: 256
     max_grad_norm: 1.0
     gamma: 0.99

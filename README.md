@@ -18,51 +18,35 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
 
 # How to interact with bot (run either of them) via client
 
-For windows:
-`.\run.bat`
-
-For linux/mac:
-`./run.sh`
-
-Run python client:
-`python client.py`
+`python run.py`
 
 For information on python virtual environment: [notes.md](notes.md)
 
-For manual: Use `--help`, like so: `.\run.bat --help`
+For manual: Use `--help`, like so: `python run.py --help`
 
 # How to run unit tests
 
-For windows:
-`.\run.bat --test`, specific test: `.\run.bat --test -k dattabot_smoke_test`
-
-For linux/mac:
-`./run.sh --test`, specific test: `./run.sh --test -k dattabot_smoke_test`
-
-Run python api test file:
-`python tests/test_api.py`
+`python run.py --test`, specific test: `python run.py --test test_smoke_test.py`
 
 # How to test api
 
-`python .\api_example.py --help`
+`python run.py --api_cmd "<API COMMAND>" --api_args "<API_ARGS>"`
 
 Examples:
 
--   `python api_example.py --api_cmd "get_encoding" --api_args "hi there"`
--   `python api_example.py --api_cmd "respond_to_queries" --api_args "hello there"`
+-   `python run.py --api_cmd "get_encoding" --api_args "hi there"`
+-   `python run.py --api_cmd "respond_to_queries" --api_args "hello there"`
 
-Single GPU/CPU Training
 
--   `python api_example.py --api_cmd "train_agent"`
+# How to train agent/model
 
-Multi (distributed) GPU Training
-
--   `torchrun --nproc_per_node=<REPLACE WITH NUMBER OF GPUS> api_example.py --api_cmd "train_agent"`
--   `torchrun --nproc_per_node=4 api_example.py --api_cmd "train_agent"`
+-   `python run.py --api_cmd "train_agent"`
 
 # Dependencies
 
--   Python version: `3.10`
+-   Python version >= `3.10`
+-   Cuda version >= `11.8`
+-   Pytorch version >= `2.2.1`
 -   Python packages: `requirements.txt`
     -   `pip install -r requirements.txt`
 
@@ -70,15 +54,14 @@ Multi (distributed) GPU Training
 
 -   Have fun learning more about AI
 -   Read/learn/implement papers (and any form of research)
--   Contribute back all of this research and implementation back to the community
+-   Contribute back all of this research and implementation back to the open source community
 
 # Goals
 
 -   Fully open source - weights and all
 -   Accessible to anyone and everyone, and can run on their own machines (don't need to hit an endpoint or give data away to a third party)
--   Make it work well on 1 single gpu (yes, just 1)
 -   Make it the one of the best agents/models in the world
--   To make the above true we have to find novel ideas
+-   To make the above true, we have to find novel ideas
 
 # License
 

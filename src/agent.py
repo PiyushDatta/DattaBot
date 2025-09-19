@@ -1,29 +1,30 @@
 import os
 import time
-from typing import Dict, Optional
 import traceback
+from typing import Dict, Optional
+
 import torch
 import torch.cuda.amp as amp
-import torch.multiprocessing as mp
 import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
+import torch.multiprocessing as mp
 import tqdm
-from src.communication_mgr import DattaBotCommunicationManager
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
+from src.communication_mgr import DattaBotCommunicationManager
 from src.data_loader import DattabotDataBuilder, DattabotDataLoader
 
 # TODO(PiyushDatta): Get Shampoo optimizer to work.
 # from src.optim_shampoo import Shampoo
 from src.gpu_profiler import BackgroundGPUProfiler
-
-from src.util import get_tensor_dtype_from_config
 from src.logger import get_logger
+from src.metric_tracker import get_metric_tracker, MetricTracker
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
-from src.metric_tracker import MetricTracker, get_metric_tracker
+
+from src.util import get_tensor_dtype_from_config, is_device_cpu
 from torch import nn, Tensor
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
+from torch.utils.data.distributed import DistributedSampler
 
 
 class Agent:
@@ -31,13 +32,19 @@ class Agent:
         # Setup config and logger, both singletons.
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
+        self.metric_tracker: MetricTracker | None = None
+        self.gpu_profiler = None
         # For file names, start with this prefix
         self.agent_fname_prefix = "DATTABOT_VERSION_1_0"
         self.data_dir = self.config.agent.data_directory
         self.plot_dir = self.config.agent.plot_directory
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
-        # Device (gpu or cpu or other)
-        self.agent_device = self.config.env.device
+        # Setup hardware settings.
+        self.setup_cpu_gpu_settings()
+        # Setup multi-gpu settings.
+        self.local_rank = 0
+        if torch.cuda.device_count() > 1:
+            self.setup_distributed()
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
         self.comm_manager = DattaBotCommunicationManager()
@@ -46,16 +53,26 @@ class Agent:
         # Setup data loader.
         self.data_builder = DattabotDataBuilder()
         # Setup model.
-        self.model = DattaBotModel()
-        self.batch_size = self.config.agent.batch_size
-        self.logger.debug(f"Batch size: {self.batch_size}")
+        self.model = DattaBotModel(device=self.agent_device)
         self.logger.debug(
             f"Model dimensions: {self.config.neural_net.model_dimensions}"
         )
-        self.logger.debug(f"Max tokens: {self.config.agent.max_response_tokens}")
+        # Load the model to our device.
+        self.model = self.model.to(self.agent_device)
+        if torch.cuda.device_count() > 1:
+            self.model = nn.parallel.DistributedDataParallel(
+                self.model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+            )
+        self.model.cuda()
         # Load model weights
         self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
         self.load_agent(filepath=self.weights_fname)
+        # Setup training objects.
+        self.batch_size = self.config.agent.batch_size
+        self.logger.debug(f"Batch size: {self.batch_size}")
+        self.logger.debug(f"Max tokens: {self.config.agent.max_response_tokens}")
         self.lr = self.config.agent.lr
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(
@@ -65,25 +82,6 @@ class Agent:
         )
         self.train_batch_idx = 0
         self.val_batch_idx = 0
-        # Setup MetricTracker (w&b, tensorboard, or plain csv).
-        self.metric_tracker: MetricTracker = get_metric_tracker(
-            project=f"{self.config.env.env_name}",
-            run_name=f"{self.config.env.env_name}_training_run_{int(time.time())}",
-        )
-        self.metric_tracker.log_config(
-            {
-                "batch_size": self.batch_size,
-                "lr": self.lr,
-                "epochs": self.config.env.training_num_epochs,
-                "model_dims": self.config.neural_net.model_dimensions,
-                "dataset": self.config.env.dataset_name,
-            }
-        )
-        # GPU profiler.
-        self.gpu_profiler = BackgroundGPUProfiler(
-            device=self.agent_device,
-            sample_every_x_seconds=1.0,
-        )
         self.lr_scheduler = TorchOneCycleLR(
             self.optimizer,
             max_lr=self.lr,
@@ -103,11 +101,32 @@ class Agent:
         #     update_freq=1,
         #     epsilon=1e-12
         # )
-        # AMP scaler (for mixed precision).
+        # Initialize AMP scaler
+        # TODO(PiyushDatta): Turn on AMP scaler after we experiment without it.
         self.scaler = None
-        # Setup GPU settings/optimizations if we have a GPU.
-        if not is_device_cpu(self.agent_device):
-            self.setup_gpu_settings()
+        # self.scaler = amp.GradScaler()
+
+    def setup_distributed(self):
+        # Ensure this is running under torchrun.
+        assert "LOCAL_RANK" in os.environ, (
+            "LOCAL_RANK environment variable not found. "
+            "You must run using `torchrun --nproc_per_node=N ...` for distributed training. See README for more information."
+        )
+        self.local_rank = int(os.environ["LOCAL_RANK"])
+        self.logger.debug(
+            f"Setting up setup_distributed with local_rank={self.local_rank}"
+        )
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(self.local_rank)
+        self.agent_device = f"cuda:{self.local_rank}"
+
+    def setup_cpu_gpu_settings(self):
+        # Optimize memory allocation
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        self.agent_device = self.config.env.device
 
     @property
     def tokenizer_obj(self):
@@ -121,38 +140,6 @@ class Agent:
         return (
             not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
         )
-
-    def setup_distributed(self):
-        # Ensure this is running under torchrun.
-        assert "LOCAL_RANK" in os.environ, (
-            "LOCAL_RANK environment variable not found. "
-            "You must run using `torchrun --nproc_per_node=N ...` for distributed training. See README for more information."
-        )
-        local_rank = int(os.environ["LOCAL_RANK"])
-        dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(local_rank)
-        self.agent_device = torch.device(f"cuda:{local_rank}")
-        self.model.to(self.agent_device)
-        self.model = nn.parallel.DistributedDataParallel(
-            self.model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-        )
-        self.model.cuda()
-
-    def setup_gpu_settings(self):
-        # Initialize AMP scaler
-        self.scaler = amp.GradScaler()
-        # Optimize memory allocation
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        # Adjust batch size and optimization parameters
-        self.gradient_accumulation_steps = 1
-        # Move model to GPU earlier and optimize
-        self.model = self.model.to(self.agent_device)
-        if torch.cuda.device_count() > 1:
-            self.setup_distributed()
 
     def save_agent(self, filepath: str) -> None:
         """
@@ -232,24 +219,44 @@ class Agent:
 
     def new_training_session(self):
         self.logger.info("Agent's training session has begun...")
+        self.train_batch_idx = 0
+        self.val_batch_idx = 0
+        # Setup MetricTracker (w&b, tensorboard, or plain csv).
+        self.metric_tracker = get_metric_tracker(
+            project=f"{self.config.env.env_name}",
+            run_name=f"{self.config.env.env_name}_training_run_{int(time.time())}",
+        )
         if self.metric_tracker.active:
+            self.metric_tracker.log_config(
+                {
+                    "batch_size": self.batch_size,
+                    "lr": self.lr,
+                    "epochs": self.config.env.training_num_epochs,
+                    "model_dims": self.config.neural_net.model_dimensions,
+                    "dataset": self.config.env.dataset_name,
+                }
+            )
             self.logger.info(
                 f"Training session can be monitored here: {self.metric_tracker.get_run_url()}"
             )
-        self.train_batch_idx = 0
-        self.val_batch_idx = 0
+        # GPU profiler.
+        self.gpu_profiler = BackgroundGPUProfiler(
+            device=self.agent_device,
+            sample_every_x_seconds=1.0,
+        )
         self.gpu_profiler.start()
         mp.set_start_method("spawn", force=True)
 
     def end_training_session(self):
         self.logger.info("Agent's training session has ended.")
-        if self.metric_tracker.active:
+        if self.metric_tracker and self.metric_tracker.active:
             self.logger.info(
                 f"Training session can be monitored here: {self.metric_tracker.get_run_url()}"
             )
+        if self.gpu_profiler:
+            self.gpu_profiler.stop()
         self.train_batch_idx = 0
         self.val_batch_idx = 0
-        self.gpu_profiler.stop()
 
     def train_agent(self) -> DattaBotAPIResponse:
         response: DattaBotAPIResponse = DattaBotAPIResponse()
@@ -274,9 +281,7 @@ class Agent:
             )
             # Set up data loaders
             self.logger.info("Setting up data.")
-            train_dataloader, val_dataloader, vocab = self.data_builder.setup_data(
-                device_for_generator=self.agent_device
-            )
+            train_dataloader, val_dataloader, vocab = self.data_builder.setup_data()
             # Actual training algorithm.
             self.logger.info(
                 f"Got training and validation data for dataset {train_dataloader.dataset_name}. Now going into training loop for "
@@ -740,6 +745,9 @@ class Agent:
         return encoded_tensor, num_batches
 
     def _get_gpu_info(self) -> list[str]:
+        gpu_name = "Could not retrieve gpu_name"
+        total_memory = "Could not retrieve total_memory"
+        total_cores = "Could not retrieve total_cores"
         if torch.cuda.is_available() and self.agent_device != "cpu":
             gpu_name = torch.cuda.get_device_name(self.agent_device)
             # Convert bytes to MB
@@ -749,12 +757,4 @@ class Agent:
             total_cores = torch.cuda.get_device_properties(
                 self.agent_device
             ).multi_processor_count
-        else:
-            gpu_name = "Could not retrieve gpu_name"
-            total_memory = "Could not retrieve total_memory"
-            total_cores = "Could not retrieve total_cores"
         return gpu_name, total_memory, total_cores
-
-
-def is_device_cpu(agent_device: str):
-    return agent_device != "cpu"

@@ -1,13 +1,23 @@
-import torch
 import pytest
+import torch
 from src.agent import Agent
 from src.api_interface import DattaBotAPIResponse
+from src.util import is_device_cpu
 
 
 @pytest.fixture
 def agent():
     # Initialize agent once per test session
     return Agent()
+
+
+def test_is_device_cpu():
+    assert is_device_cpu("cpu") == True
+    assert is_device_cpu("cuda") == False
+    assert is_device_cpu("cuda:0") == False
+    assert is_device_cpu("cuda:1") == False
+    assert is_device_cpu("cuda:234234") == False
+    assert is_device_cpu("cuda:0,1") == False
 
 
 def test_agent_initialization(agent):

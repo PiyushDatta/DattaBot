@@ -1,12 +1,16 @@
 from omegaconf import DictConfig
 from torch import (
     dtype as torch_dtype,
-    float64 as torch_float64,
-    float32 as torch_float32,
     float16 as torch_float16,
-    int64 as torch_int64,
+    float32 as torch_float32,
+    float64 as torch_float64,
     int32 as torch_int32,
+    int64 as torch_int64,
 )
+
+
+def is_device_cpu(agent_device: str):
+    return agent_device == "cpu"
 
 
 class Singleton(type):

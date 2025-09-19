@@ -1,29 +1,20 @@
-from typing import Optional
-from torch import (
-    nn,
-    cat,
-    bmm,
-    arange,
-    Tensor,
-    set_default_device as torch_set_default_device,
-)
 from math import sqrt
+from typing import Optional
+
 from numpy import sqrt as np_sqrt
-from src.tokenizer import get_tokenizer
-from src.logger import get_logger
 from src.agent_config import get_agent_config
+from src.logger import get_logger
+from src.tokenizer import get_tokenizer
+from torch import arange, bmm, cat, nn, Tensor
 
 
 # Transformer Model.
 class DattaBotModel(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, device: str = "cpu") -> None:
         super().__init__()
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
-        self.device = self.config.env.device
-        # TODO(PiyushDatta): Once supported, set default dtype as int64. Currently
-        #                    only float types are supported.
-        torch_set_default_device(self.device)
+        self.device = device
         self.vocab_size = get_tokenizer().vocab_size
         assert (
             self.vocab_size is not None and self.vocab_size > 0

@@ -1,8 +1,9 @@
 import os
 from typing import Dict, Optional
+
+import torch.distributed as dist
 import wandb
 from src.logger import get_logger
-import torch.distributed as dist
 
 
 class MetricTracker:
@@ -35,16 +36,27 @@ class MetricTracker:
         os.makedirs(log_dir, exist_ok=True)
 
         try:
-            wandb.init(
-                project=self.project,
-                name=self.run_name,
-                dir=self.log_dir,
-                mode="online" if os.getenv("WANDB_API_KEY") else "offline",
-            )
-            self.active = True
-            run_name_safe = getattr(wandb.run, "name", "unknown")
-            run_mode_safe = getattr(wandb.run, "mode", "unknown")
-            self.logger.info(f"W&B run started: {run_name_safe} (mode={run_mode_safe})")
+            if (
+                not dist.is_available()
+                or not dist.is_initialized()
+                or dist.get_rank() == 0
+            ):
+                wandb.init(
+                    project=self.project,
+                    name=self.run_name,
+                    dir=self.log_dir,
+                    mode="online" if os.getenv("WANDB_API_KEY") else "offline",
+                )
+                self.active = True
+                run_name_safe = getattr(wandb.run, "name", "unknown")
+                run_mode_safe = getattr(wandb.run, "mode", "unknown")
+                self.logger.info(
+                    f"W&B run started: {run_name_safe} (mode={run_mode_safe})"
+                )
+            else:
+                self.logger.info(
+                    f"W&B run NOT started on this gpu, since rank is not 0. (rank={dist.get_rank()})"
+                )
         except Exception as e:
             self.logger.error(f"Could not initialize W&B: {e}")
             self.active = False

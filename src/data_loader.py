@@ -3,15 +3,15 @@ from enum import Enum
 from typing import Iterator, Optional, Union
 
 import torch
-from datasets import load_dataset
-from torch import Tensor
 import torch.distributed as dist
-from torch.utils.data import DataLoader as TorchDataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
+from datasets import load_dataset
 
 from src.agent_config import get_agent_config
 from src.logger import get_logger
-from src.tokenizer import get_tokenizer, DattaBotTokenizer
+from src.tokenizer import DattaBotTokenizer, get_tokenizer
+from torch import Tensor
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 
 class DatasetType(Enum):
@@ -105,7 +105,6 @@ class DattabotDataBuilder:
         self.seq_len = self.config.agent.max_response_tokens
         self.data_dir = self.config.agent.data_directory
         self.dataset_name = string_to_enum(self.config.env.dataset_name)
-        self.agent_device = self.config.env.device
 
     def download_dataset(self):
         """Download dataset and split into train/val"""
@@ -132,12 +131,9 @@ class DattabotDataBuilder:
             return DistributedSampler(dataset, shuffle=shuffle)
         return None
 
-    def setup_data(self, device_for_generator: str = "cpu"):
+    def setup_data(self):
         """
         Build PyTorch DataLoaders for training and validation.
-        Args:
-            device_for_generator: Device on which to create the PyTorch generator for shuffling.
-                                Default is 'cpu'.
         """
         os.makedirs(self.data_dir, exist_ok=True)
         train_data, val_data = self.download_dataset()
@@ -149,9 +145,9 @@ class DattabotDataBuilder:
             val_data, tokenizer=self.tokenizer, seq_length=self.seq_len
         )
         # Distributed samplers.
+        generator: torch.Generator = torch.Generator().manual_seed(42)
         train_sampler = self.get_distributed_sampler(train_dataset, shuffle=True)
         val_sampler = self.get_distributed_sampler(val_dataset, shuffle=False)
-
         train_loader = DattabotDataLoader(
             dataset=train_dataset,
             dataset_name=self.dataset_name,
@@ -159,7 +155,7 @@ class DattabotDataBuilder:
             sampler=train_sampler,
             # Only shuffle if not distributed
             shuffle=(train_sampler is None),
-            generator=torch.Generator(device=device_for_generator).manual_seed(42),
+            generator=generator,
         )
         val_loader = DattabotDataLoader(
             dataset=val_dataset,

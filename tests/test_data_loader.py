@@ -1,16 +1,17 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
-from torch import Tensor
-from unittest.mock import patch, MagicMock
 from src.agent_config import get_agent_config
 from src.data_loader import (
-    TextDataset,
-    DattabotDataLoader,
-    DattabotDataBuilder,
-    string_to_enum,
     DatasetType,
+    DattabotDataBuilder,
+    DattabotDataLoader,
+    string_to_enum,
+    TextDataset,
 )
 from src.tokenizer import get_tokenizer
+from torch import Tensor
 
 
 # --- Fixtures ---
@@ -110,9 +111,7 @@ def test_data_builder_setup(mock_load_dataset):
     agent_device = torch.device(get_agent_config().env.device)
     builder = DattabotDataBuilder()
     builder.download_dataset = MagicMock(return_value=(train_mock, val_mock))
-    train_loader, val_loader, vocab = builder.setup_data(
-        device_for_generator=agent_device
-    )
+    train_loader, val_loader, vocab = builder.setup_data()
 
     train_batch = next(iter(train_loader))
     x_train, y_train = train_batch
