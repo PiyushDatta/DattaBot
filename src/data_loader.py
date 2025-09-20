@@ -4,20 +4,22 @@ from typing import Iterator, Optional, Union
 
 import torch
 import torch.distributed as dist
+from torch import Tensor
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from datasets import load_dataset
 
 from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import DattaBotTokenizer, get_tokenizer
-from torch import Tensor
-from torch.utils.data import DataLoader as TorchDataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
 
 
 class DatasetType(Enum):
     OPENWEBTEXT = "openwebtext"
     AG_NEWS = "ag_news"
     WIKITEXT = "wikitext"
+    FINANCEQA = "financeqa"
+    MMLU_REDUX = "mmlu_redux"
 
 
 def string_to_enum(dataset_name: str) -> DatasetType:
@@ -33,10 +35,7 @@ class TextDataset(Dataset):
     """Custom dataset for GPT-style training"""
 
     def __init__(
-        self,
-        data: list[Union[str, dict]],
-        tokenizer: DattaBotTokenizer,
-        seq_length: int = 256,
+        self, data: list[dict], tokenizer: DattaBotTokenizer, seq_length: int = 256
     ):
         self.data = data
         self.tokenizer = tokenizer
@@ -47,9 +46,19 @@ class TextDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
         item = self.data[idx]
-        text = item["text"] if isinstance(item, dict) else item
 
-        # Encode text
+        if isinstance(item, dict):
+            # For FinQA: concatenate question + context
+            if "question" in item and "context" in item:
+                text = f"Question: {item['question']} Context: {item['context']}"
+            elif "text" in item:
+                text = item["text"]
+            else:
+                # fallback: stringify dict
+                text = str(item)
+        else:
+            text = item
+
         tokens = self.tokenizer.encode(text)
         # Truncate or pad to seq_length + 1
         if len(tokens) < self.seq_length + 1:
@@ -97,6 +106,8 @@ class DattabotDataLoader(TorchDataLoader):
 
 
 class DattabotDataBuilder:
+    """Data builder supporting FinanceQA, MMLU-Redux, and standard datasets."""
+
     def __init__(self):
         self.config = get_agent_config()
         self.logger = get_logger(logging_level=self.config.env.logging_level)
@@ -111,13 +122,26 @@ class DattabotDataBuilder:
         if self.dataset_name == DatasetType.AG_NEWS:
             dataset = load_dataset("ag_news", split=["train", "test"])
             return dataset[0], dataset[1]
+
         elif self.dataset_name == DatasetType.OPENWEBTEXT:
             dataset = load_dataset("openwebtext", split="train")
             split_dataset = dataset.train_test_split(test_size=0.2)
             return split_dataset["train"], split_dataset["test"]
+
         elif self.dataset_name == DatasetType.WIKITEXT:
             dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
             return dataset["train"], dataset["validation"]
+
+        elif self.dataset_name == DatasetType.FINANCEQA:
+            dataset = load_dataset("ibm-research/finqa", split="train")
+            split_dataset = dataset.train_test_split(test_size=0.1)
+            return split_dataset["train"], split_dataset["test"]
+
+        elif self.dataset_name == DatasetType.MMLU_REDUX:
+            dataset = load_dataset("mmlu-redux", split="train")
+            split_dataset = dataset.train_test_split(test_size=0.1)
+            return split_dataset["train"], split_dataset["test"]
+
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset_name}")
 
@@ -132,9 +156,7 @@ class DattabotDataBuilder:
         return None
 
     def setup_data(self):
-        """
-        Build PyTorch DataLoaders for training and validation.
-        """
+        """Build PyTorch DataLoaders for training and validation."""
         os.makedirs(self.data_dir, exist_ok=True)
         train_data, val_data = self.download_dataset()
         vocab = self.build_vocab()
@@ -144,10 +166,11 @@ class DattabotDataBuilder:
         val_dataset = TextDataset(
             val_data, tokenizer=self.tokenizer, seq_length=self.seq_len
         )
-        # Distributed samplers.
+        # Distributed samplers
         generator: torch.Generator = torch.Generator().manual_seed(42)
         train_sampler = self.get_distributed_sampler(train_dataset, shuffle=True)
         val_sampler = self.get_distributed_sampler(val_dataset, shuffle=False)
+
         train_loader = DattabotDataLoader(
             dataset=train_dataset,
             dataset_name=self.dataset_name,
@@ -164,4 +187,5 @@ class DattabotDataBuilder:
             sampler=val_sampler,
             shuffle=False,
         )
+
         return train_loader, val_loader, vocab

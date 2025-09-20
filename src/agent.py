@@ -92,7 +92,7 @@ class Agent:
         self.lr_scheduler = TorchOneCycleLR(
             self.optimizer,
             max_lr=self.lr,
-            epochs=self.config.env.training_num_epochs,
+            epochs=self.config.agent.max_training_num_epochs,
             steps_per_epoch=self.config.agent.num_batches_train_every_epoch,
             pct_start=0.3,
             anneal_strategy="cos",
@@ -162,7 +162,7 @@ class Agent:
                 {
                     "batch_size": self.batch_size,
                     "lr": self.lr,
-                    "epochs": self.config.env.training_num_epochs,
+                    "epochs": self.config.agent.max_training_num_epochs,
                     "model_dims": self.config.neural_net.model_dimensions,
                     "dataset": self.config.env.dataset_name,
                 }
@@ -190,6 +190,16 @@ class Agent:
         self.val_batch_idx = 0
 
     def train_agent(self) -> DattaBotAPIResponse:
+        """
+        Main training loop with early stop conditions:
+        - max_train_tokens
+        - max_train_time_hours
+        Includes:
+        - periodic checkpoint saving
+        - best model saving
+        - final model saving
+        """
+        self.logger.info("Starting training process.")
         response: DattaBotAPIResponse = DattaBotAPIResponse()
         response.text = "Starting training."
         train_interrupted = False
@@ -200,6 +210,14 @@ class Agent:
         vocab: dict[str, int] = {}
         try:
             self.new_training_session()
+            tokens_processed = 0
+            tokens_per_batch = self.batch_size * self.config.agent.max_response_tokens
+            max_train_tokens = self.config.agent.max_train_tokens
+            max_train_time = self.config.agent.max_train_time_hours
+            total_steps = 0
+            ckpt_interval = self.config.agent.checkpoint_interval_train_steps
+            # seconds
+            max_train_time = max_train_time * 3600
             # Record start time
             train_start_time = time.time()
             # Set an arbitrary starting best val loss amount.
@@ -216,44 +234,65 @@ class Agent:
             # Actual training algorithm.
             self.logger.info(
                 f"Got training and validation data for dataset {train_dataloader.dataset_name}. Now going into training loop for "
-                f"{self.config.env.training_num_epochs} epochs, "
+                f"{self.config.agent.max_training_num_epochs} epochs, "
                 f"{num_train_batches_per_phase} batches per training epoch, "
                 f"and {num_val_batches_per_phase} batches per validation epoch. "
                 f"Length of vocab: {len(vocab)}. "
                 f"Batch size: {self.batch_size}."
             )
-            for epoch in range(self.config.env.training_num_epochs):
+            for epoch in range(self.config.agent.max_training_num_epochs):
                 curr_epoch_num = epoch + 1
                 if self._is_rank_0():
                     self.logger.debug(
-                        f"\nEpoch {curr_epoch_num}/{self.config.env.training_num_epochs}"
+                        f"\nEpoch {curr_epoch_num}/{self.config.agent.max_training_num_epochs}"
                     )
                 # Tell DistributedSampler to shuffle differently this epoch.
                 if isinstance(train_dataloader.sampler, DistributedSampler):
                     train_dataloader.sampler.set_epoch(curr_epoch_num)
                 if isinstance(val_dataloader.sampler, DistributedSampler):
                     val_dataloader.sampler.set_epoch(curr_epoch_num)
-                # Perform training phase
-                avg_train_loss = self._train_epoch(
-                    epoch_num=curr_epoch_num,
-                    dataloader=train_dataloader,
-                    num_batches=num_train_batches_per_phase,
-                )
-                response.num_train_batches += num_train_batches_per_phase
-                if self._is_rank_0():
-                    self.logger.debug(
-                        f"Average train loss after {num_train_batches_per_phase} batches: {avg_train_loss:.2f}"
+                # === Training ===
+                avg_train_loss, train_steps_this_epoch, train_tokens_in_epoch = (
+                    self._train_epoch(
+                        epoch_num=curr_epoch_num,
+                        dataloader=train_dataloader,
+                        num_batches=num_train_batches_per_phase,
                     )
-                # Validate.
-                avg_val_loss = self._val_epoch(
-                    epoch_num=curr_epoch_num,
-                    dataloader=val_dataloader,
-                    num_batches=num_val_batches_per_phase,
                 )
-                response.num_val_batches += num_val_batches_per_phase
+                total_steps += train_steps_this_epoch
+                # Update tokens processed
+                tokens_processed += train_tokens_in_epoch
+                response.num_train_batches += train_steps_this_epoch
+                elapsed = time.time() - train_start_time
                 if self._is_rank_0():
                     self.logger.debug(
-                        f"Average validation loss after {num_val_batches_per_phase} batches: {avg_val_loss:.2f}"
+                        f"[Epoch {curr_epoch_num}] avg_train_loss={avg_train_loss:.4f}, "
+                        f"tokens_processed={tokens_processed:,}"
+                    )
+                # Stop conditions
+                if tokens_processed >= max_train_tokens:
+                    self.logger.info(
+                        f"Reached {tokens_processed:,} tokens. Stopping training."
+                    )
+                    break
+                if elapsed >= max_train_time:
+                    self.logger.info(
+                        f"Reached {elapsed/3600:.2f} hours. Stopping training."
+                    )
+                    break
+                # === Validation ===
+                avg_val_loss, val_steps_this_epoch, val_tokens_in_epoch = (
+                    self._val_epoch(
+                        epoch_num=curr_epoch_num,
+                        dataloader=val_dataloader,
+                        num_batches=num_val_batches_per_phase,
+                    )
+                )
+                tokens_processed += val_tokens_in_epoch
+                response.num_val_batches += val_steps_this_epoch
+                if self._is_rank_0():
+                    self.logger.debug(
+                        f"[Epoch {curr_epoch_num}] avg_val_loss={avg_val_loss:.4f}"
                     )
                     # Log epoch metrics to MetricTracker
                     self.metric_tracker.log_metrics(
@@ -263,6 +302,7 @@ class Agent:
                         },
                         step=None,
                     )
+                # Save best model.
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     if self._is_rank_0():
@@ -272,10 +312,18 @@ class Agent:
                             logger=self.logger,
                         )
                         self.logger.info("New best model saved!")
-                    self.logger.info(
-                        f"Epoch {curr_epoch_num}/{self.config.env.training_num_epochs}"
-                    )
                     self.logger.info(f"Best validation loss: {avg_val_loss:.2f}\n")
+                # Periodic checkpoint.
+                if self._is_rank_0() and total_steps % ckpt_interval == 0:
+                    if self._is_rank_0():
+                        save_agent(
+                            model=self.model,
+                            filepath=self.weights_fname,
+                            logger=self.logger,
+                        )
+                        self.logger.info(
+                            f"New model saved since total_steps ({total_steps}) has hit ckpt_interval ({ckpt_interval})."
+                        )
             # Done training!
             if self.metric_tracker.active:
                 response.text = (
@@ -302,6 +350,14 @@ class Agent:
             self.logger.error(f"An error occurred during training:\n{tb_str}")
             response.text = err_msg
             self.end_training_session()
+        finally:
+            # Always save the final model.
+            if self._is_rank_0():
+                save_agent(
+                    model=self.model,
+                    filepath=self.weights_fname,
+                    logger=self.logger,
+                )
         # Log the training details, including the time taken to train.
         train_end_time = time.time()
         total_training_time = train_end_time - train_start_time
@@ -324,11 +380,20 @@ class Agent:
         return response
 
     def _train_epoch(
-        self, epoch_num: int, dataloader: DattabotDataLoader, num_batches: int
-    ) -> float:
+        self, epoch_num: int, dataloader, num_batches: int
+    ) -> tuple[float, int, int]:
+        """
+        Run one training epoch.
+
+        Returns:
+            avg_loss: Average loss for this epoch
+            steps: Number of batches processed
+            tokens_processed: Number of tokens processed
+        """
         self.model.train()
-        total_loss = 0
+        total_loss = 0.0
         total_steps = 0
+        total_tokens = 0
         log_and_plot_every_x_steps = (
             self.config.agent.logging_and_plotting_every_x_steps
         )
@@ -350,10 +415,9 @@ class Agent:
             )
             # Zero the gradients.
             self.optimizer.zero_grad()
-            # Model predicts.
-            # shape: [batch_size, sequence_length, vocab_size]
+            # Forward + loss, shape: [batch_size, sequence_length, vocab_size]
             with amp.autocast(enabled=(not is_device_cpu(self.agent_device))):
-                # Forward pass
+                # Forward pass.
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
                 # [batch*seq_len, vocab]
                 logits = logits.view(-1, tgt_vocab_size)
@@ -362,6 +426,7 @@ class Agent:
                 # If using CrossEntropyLoss, mask out padding tokens.
                 padding_mask = labels != self.tokenizer.pad_token_id
                 loss = (loss * padding_mask).sum() / padding_mask.sum()
+            # Backprop.
             if self.scaler:
                 self.scaler.scale(loss).backward()
             else:
@@ -379,12 +444,13 @@ class Agent:
                 self.scaler.update()
             else:
                 self.optimizer.step()
-            # Update learning rate if using a scheduler
+            # Update learning rate if using a scheduler.
             if self.lr_scheduler:
                 self.lr_scheduler.step()
             # Update metrics
             total_loss += loss.item()
             total_steps += 1
+            total_tokens += input_ids.numel()
             avg_loss = total_loss / total_steps
             # Update progress bar
             progress_bar.set_postfix(
@@ -405,18 +471,10 @@ class Agent:
                 )
                 if total_steps % log_and_plot_every_x_steps == 0:
                     self.logger.info(
-                        f"Logging every {log_and_plot_every_x_steps} steps:\n"
-                        + str(
-                            {
-                                "global step": total_steps,
-                                "epoch": epoch_num,
-                                "train/loss": loss.item(),
-                                "train/perplexity": torch.exp(loss).item(),
-                                "train/learning_rate": self.optimizer.param_groups[0][
-                                    "lr"
-                                ],
-                            }
-                        )
+                        f"[Epoch {epoch_num} | Step {total_steps}] "
+                        f"loss={loss.item():.4f}, "
+                        f"perplexity={torch.exp(loss).item():.2f}, "
+                        f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
                     )
                     latest_metrics = self.gpu_profiler.get_latest_metrics()
                     if latest_metrics:
@@ -430,18 +488,28 @@ class Agent:
         # Sync loss across all ranks.
         if dist.is_available() and dist.is_initialized():
             loss_tensor = torch.tensor(
-                [total_loss, total_steps], device=self.agent_device
+                [total_loss, total_steps, total_tokens], device=self.agent_device
             )
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            total_loss, total_steps = loss_tensor.tolist()
-        return avg_loss
+            total_loss, total_steps, total_tokens = loss_tensor.tolist()
+            avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
+        return avg_loss, total_steps, total_tokens
 
     def _val_epoch(
-        self, epoch_num: int, dataloader: DattabotDataLoader, num_batches: int
-    ) -> float:
+        self, epoch_num: int, dataloader, num_batches: int
+    ) -> tuple[float, int, int]:
+        """
+        Run one validation epoch.
+
+        Returns:
+            avg_loss: Average validation loss
+            steps: Number of batches processed
+            tokens_processed: Number of tokens processed
+        """
         self.model.eval()
-        total_loss = 0
+        total_loss = 0.0
         total_steps = 0
+        total_tokens = 0
         tgt_vocab_size = self.tokenizer.vocab_size
         # Setup progress bar
         progress_bar = tqdm.tqdm(
@@ -450,7 +518,7 @@ class Agent:
         # Go through all the batches.
         # Disable gradient calculations and go through all the batches.
         with torch.no_grad():
-            for batch_idx in progress_bar:
+            for _ in progress_bar:
                 batch = next(dataloader)
                 input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
                     self.agent_device
@@ -458,8 +526,7 @@ class Agent:
                 attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
                     self.agent_device
                 )
-                # Model predicts.
-                # shape: [batch_size, sequence_length, vocab_size]
+                # Forward + loss, shape: [batch_size, sequence_length, vocab_size]
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
                 logits = logits.view(-1, tgt_vocab_size)
                 labels = labels.view(-1)
@@ -469,13 +536,14 @@ class Agent:
                 loss = (loss * padding_mask).sum() / padding_mask.sum()
                 total_loss += loss.item()
                 total_steps += 1
+                total_tokens += input_ids.numel()
                 avg_loss = total_loss / total_steps
-                perplexity = torch.exp(torch.tensor(avg_loss))
+                perplexity = torch.exp(torch.tensor(avg_loss)).item()
                 # Update progress bar.
                 progress_bar.set_postfix(
                     {
                         "val_loss": avg_loss,
-                        "val_perplexity": perplexity.item(),
+                        "val_perplexity": perplexity,
                     }
                 )
                 if self._is_rank_0():
@@ -483,37 +551,33 @@ class Agent:
                     self.metric_tracker.log_metrics(
                         {
                             "val/batch_loss": loss.item(),
-                            "val/batch_perplexity": perplexity.item(),
+                            "val/batch_perplexity": torch.exp(loss).item(),
                         },
                         step=None,
                     )
         # Sync loss across all ranks.
         if dist.is_available() and dist.is_initialized():
             loss_tensor = torch.tensor(
-                [total_loss, total_steps], device=self.agent_device
+                [total_loss, total_steps, total_tokens], device=self.agent_device
             )
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            total_loss, total_steps = loss_tensor.tolist()
+            total_loss, total_steps, total_tokens = loss_tensor.tolist()
+            avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
         # Log epoch summary if rank 0.
         if self._is_rank_0():
             self.logger.info(
-                f"Logging every validation, current epoch {epoch_num}:\n"
-                + str(
-                    {
-                        "val/loss": avg_loss,
-                        "val/perplexity": torch.exp(torch.tensor(avg_loss)).item(),
-                    }
-                )
+                f"[Validation | Epoch {epoch_num}] avg_loss={avg_loss:.4f}, "
+                f"perplexity={torch.exp(torch.tensor(avg_loss)).item():.2f}"
             )
             self.metric_tracker.log_metrics(
                 {
                     "val/loss": avg_loss,
-                    "val/perplexity": perplexity.item(),
+                    "val/perplexity": perplexity,
                 },
                 step=None,
             )
 
-        return avg_loss
+        return avg_loss, total_steps, total_tokens
 
     def _inference(self, queries: list[str]) -> list[DattaBotAPIResponse]:
         """
