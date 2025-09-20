@@ -134,6 +134,7 @@ class Agent:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         self.agent_device = self.config.env.device
+        torch.cuda.empty_cache()
 
     @property
     def tokenizer_obj(self):
@@ -456,7 +457,7 @@ class Agent:
             progress_bar.set_postfix(
                 {
                     "loss": avg_loss,
-                    "perplexity": torch.exp(torch.tensor(avg_loss)),
+                    "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
                 }
             )
             # Log metrics using MetricTracker
