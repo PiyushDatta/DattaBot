@@ -1,8 +1,8 @@
 neural_net:
-    n_layers: 6
-    n_heads: 8
-    model_dimensions: 512
-    hidden_layers: 2048
+    n_layers: 24
+    n_heads: 16
+    model_dimensions: 1024
+    hidden_layers: 4096
     zeroed_drop_probability: 0.1
 agent:
     max_training_num_epochs: 10
@@ -21,7 +21,7 @@ agent:
     weight_decay: 0.1
     data_directory: "dattabot_data_dir"
     plot_directory: "dattabot_data_dir/plots"
-    batch_size: 16
+    batch_size: 64
     logging_and_plotting_every_x_steps: 20
     validation_save_weights_every_x_batches: 100
     validation_no_save_weights_every_x_batches: 10
