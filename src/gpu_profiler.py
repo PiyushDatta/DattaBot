@@ -1,14 +1,16 @@
+import logging
 import queue
 import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Optional
 
 import psutil
 import torch
 
+from src.logger import get_logger
 from src.metric_tracker import MetricTracker, get_metric_tracker
 
 
@@ -39,6 +41,7 @@ class BackgroundGPUProfiler:
         self.should_run = False
         self.profiler_thread = None
         self.metric_tracker: MetricTracker = get_metric_tracker()
+        self.logger = get_logger()
 
     def _get_current_metrics(self) -> GPUMetrics:
         """Collect current GPU and system metrics"""
@@ -175,7 +178,7 @@ class BackgroundGPUProfiler:
         except queue.Empty:
             return None
 
-    def get_summary(self) -> Dict:
+    def get_summary(self) -> dict:
         """Generate summary statistics from collected metrics"""
         if not self.metrics_history:
             return {}
@@ -197,3 +200,18 @@ class BackgroundGPUProfiler:
             / len(self.metrics_history),
             "max_ram_percent": max(m.ram_percent for m in self.metrics_history),
         }
+
+    def log_mem(self, note=""):
+        if not self.logger.isEnabledFor(logging.DEBUG):
+            return
+        torch.cuda.synchronize(self.device)
+        allocated = torch.cuda.memory_allocated(self.device) / 1024**2
+        reserved = torch.cuda.memory_reserved(self.device) / 1024**2
+        max_allocated = torch.cuda.max_memory_allocated(self.device) / 1024**2
+        max_reserved = torch.cuda.max_memory_reserved(self.device) / 1024**2
+        msg = (
+            f"[GPU Mem] {note} "
+            f"allocated={allocated:.2f} MB, reserved={reserved:.2f} MB, "
+            f"max_allocated={max_allocated:.2f} MB, max_reserved={max_reserved:.2f} MB"
+        )
+        self.logger.debug(msg)

@@ -211,6 +211,7 @@ class Agent:
         vocab: dict[str, int] = {}
         try:
             self.new_training_session()
+            self.gpu_profiler.log_mem("Training - start training")
             tokens_processed = 0
             tokens_per_batch = self.batch_size * self.config.agent.max_response_tokens
             max_train_tokens = self.config.agent.max_train_tokens
@@ -230,8 +231,10 @@ class Agent:
                 self.config.agent.num_batches_val_every_epoch
             )
             # Set up data loaders
+            self.gpu_profiler.log_mem("Training - before setup data")
             self.logger.info("Setting up data.")
             train_dataloader, val_dataloader, vocab = self.data_builder.setup_data()
+            self.gpu_profiler.log_mem("Training - after setup data")
             # Actual training algorithm.
             self.logger.info(
                 f"Got training and validation data for dataset {train_dataloader.dataset_name}. Now going into training loop for "
@@ -252,6 +255,7 @@ class Agent:
                     train_dataloader.sampler.set_epoch(curr_epoch_num)
                 if isinstance(val_dataloader.sampler, DistributedSampler):
                     val_dataloader.sampler.set_epoch(curr_epoch_num)
+                self.gpu_profiler.log_mem("Training - before train epoch")
                 # === Training ===
                 avg_train_loss, train_steps_this_epoch, train_tokens_in_epoch = (
                     self._train_epoch(
@@ -260,6 +264,7 @@ class Agent:
                         num_batches=num_train_batches_per_phase,
                     )
                 )
+                self.gpu_profiler.log_mem("Training - after train epoch")
                 total_steps += train_steps_this_epoch
                 # Update tokens processed
                 tokens_processed += train_tokens_in_epoch
@@ -423,7 +428,12 @@ class Agent:
                 # [batch*seq_len, vocab]
                 logits = logits.view(-1, tgt_vocab_size)
                 labels = labels.view(-1)
+                self.logger.debug(
+                    f"logits.shape = {logits.shape}, labels.shape = {labels.shape}"
+                )
+                self.gpu_profiler.log_mem("Training - before loss")
                 loss = self.criterion(logits, labels)
+                self.gpu_profiler.log_mem("Training - after loss")
                 # If using CrossEntropyLoss, mask out padding tokens.
                 padding_mask = labels != self.tokenizer.pad_token_id
                 loss = (loss * padding_mask).sum() / padding_mask.sum()
