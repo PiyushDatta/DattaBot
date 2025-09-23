@@ -1,3 +1,5 @@
+import logging
+
 from omegaconf import DictConfig
 from torch import (
     dtype as torch_dtype,
@@ -37,3 +39,10 @@ def get_tensor_dtype_from_config(config: DictConfig) -> torch_dtype:
 
     assert 0, f"Unsupported tensor dtype: {config_tensor_dtype}."
     return None
+
+
+def get_logging_level_from_config(config: DictConfig) -> int:
+    logging_level = config.env.logging_level
+    if isinstance(logging_level, str):
+        logging_level = logging.getLevelName(logging_level)
+    return logging_level

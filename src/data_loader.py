@@ -4,14 +4,15 @@ from typing import Iterator, Optional, Union
 
 import torch
 import torch.distributed as dist
-from torch import Tensor
-from torch.utils.data import DataLoader as TorchDataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
 from datasets import load_dataset
 
 from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import DattaBotTokenizer, get_tokenizer
+from src.util import get_logging_level_from_config
+from torch import Tensor
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 
 class DatasetType(Enum):
@@ -110,7 +111,9 @@ class DattabotDataBuilder:
 
     def __init__(self):
         self.config = get_agent_config()
-        self.logger = get_logger(logging_level=self.config.env.logging_level)
+        self.logger = get_logger(
+            logging_level=get_logging_level_from_config(self.config)
+        )
         self.tokenizer = get_tokenizer()
         self.batch_size = self.config.agent.batch_size
         self.seq_len = self.config.agent.max_response_tokens

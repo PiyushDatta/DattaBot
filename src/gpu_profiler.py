@@ -9,9 +9,10 @@ from typing import Optional
 
 import psutil
 import torch
+import torch.distributed as dist
 
 from src.logger import get_logger
-from src.metric_tracker import MetricTracker, get_metric_tracker
+from src.metric_tracker import get_metric_tracker, MetricTracker
 
 
 @dataclass
@@ -42,6 +43,10 @@ class BackgroundGPUProfiler:
         self.profiler_thread = None
         self.metric_tracker: MetricTracker = get_metric_tracker()
         self.logger = get_logger()
+        if dist.is_available() and dist.is_initialized():
+            self.rank = dist.get_rank()
+        else:
+            self.rank = 0
 
     def _get_current_metrics(self) -> GPUMetrics:
         """Collect current GPU and system metrics"""
@@ -149,7 +154,7 @@ class BackgroundGPUProfiler:
                 time.sleep(self.sampling_interval)
 
             except Exception as e:
-                print(f"Error in profiler loop: {e}")
+                self.logger.error(f"Error in profiler loop: {e}")
                 time.sleep(self.sampling_interval)
 
     def start(self):
@@ -201,8 +206,9 @@ class BackgroundGPUProfiler:
             "max_ram_percent": max(m.ram_percent for m in self.metrics_history),
         }
 
-    def log_mem(self, note=""):
-        if not self.logger.isEnabledFor(logging.DEBUG):
+    def log_gpu_memory(self, note=""):
+        # Quickly return if debug logging is disabled or not rank 0 gpu.
+        if not self.logger.isEnabledFor(logging.DEBUG) or self.rank != 0:
             return
         torch.cuda.synchronize(self.device)
         allocated = torch.cuda.memory_allocated(self.device) / 1024**2
@@ -214,4 +220,4 @@ class BackgroundGPUProfiler:
             f"allocated={allocated:.2f} MB, reserved={reserved:.2f} MB, "
             f"max_allocated={max_allocated:.2f} MB, max_reserved={max_reserved:.2f} MB"
         )
-        self.logger.debug(msg)
+        self.logger.info(msg)

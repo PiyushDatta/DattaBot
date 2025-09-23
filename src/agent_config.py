@@ -1,8 +1,9 @@
 import os
+
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
-from src.util import Singleton
 from src.logger import get_logger
+from src.util import get_logging_level_from_config, Singleton
 
 ABSOLUTE_PATH_CONFIG_DIR = os.path.join(os.getcwd(), "configs")
 CONFIG_FILE_NAME = "dattabot_v1"
@@ -24,8 +25,8 @@ class AgentConfig(object, metaclass=Singleton):
             config_dir=self._config_dir,
             job_name=self._config_file_name,
         )
-        self._config = compose(config_name=self._config_file_name)
-        _logger = get_logger(logging_level=self._config.env.logging_level)
+        self._config: DictConfig = compose(config_name=self._config_file_name)
+        _logger = get_logger(logging_level=get_logging_level_from_config(self._config))
         _logger.info(f"Using agent config file: {self._config_file_name}")
         _logger.debug(f"Contents of agent config file:\n{self.get_config_str()}")
 

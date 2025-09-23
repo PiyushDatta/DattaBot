@@ -1,5 +1,5 @@
-import torch
 import pytest
+import torch
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
 
@@ -8,19 +8,28 @@ from src.tokenizer import get_tokenizer
 def test_decoder_only_forward(batch_size, seq_len):
     model = DattaBotModel()
     tokenizer = get_tokenizer()
-
-    # Fake batch of token IDs in vocab range
+    d_model = model.d_model
+    # Fake batch of token IDs in vocab range.
     vocab_size = tokenizer.vocab_size
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=model.device)
+    # Fake labels (targets) with the same shape and valid vocab range.
+    labels = torch.randint(0, vocab_size, (batch_size, seq_len), device=model.device)
 
+    # Check input and label type & shape
+    # input = batch_size, seq_len
+    assert isinstance(input_ids, torch.Tensor)
+    assert isinstance(labels, torch.Tensor)
+    assert input_ids.shape == (batch_size, seq_len)
+    assert labels.shape == (batch_size, seq_len)
+
+    # Foward pass.
     logits = model(input_ids)
-
-    # Check output type & shape
     assert isinstance(logits, torch.Tensor)
-    assert logits.shape == (batch_size, seq_len, vocab_size)
+    assert logits.shape == (batch_size, seq_len, d_model)
 
     # Backward pass should work
     loss = logits.mean()
+    # Backward pass.
     loss.backward()
     for p in model.parameters():
         if p.requires_grad:

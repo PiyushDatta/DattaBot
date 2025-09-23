@@ -1,7 +1,9 @@
-from enum import Enum
-from src.api_interface import DattaBotAPIResponse
-from src.api import DattaBotAPI
 from argparse import ArgumentParser
+from enum import Enum
+
+from src.api import DattaBotAPI
+from src.api_interface import DattaBotAPIResponse
+from src.logger import get_logger
 
 # Defines the delimiter to split the API args.
 DELIMITER = ","
@@ -23,8 +25,9 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
 
     api_cmd = api_cmd.strip().upper()
     api_client = DattaBotAPI()
-    print(f"API command: {api_cmd}")
-    print(f"API args: {api_args}")
+    logger = get_logger()
+    logger.info(f"API command: {api_cmd}")
+    logger.info(f"API args: {api_args}")
     match api_cmd:
         case APIActions.RESPOND_TO_QUERIES.name:
             queries = api_args.split(DELIMITER)
@@ -43,8 +46,10 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
         case APIActions.TRAIN_AGENT.name:
             print(api_client.train_agent())
         case _:
-            print(f"API Command selected: {api_cmd}. This is an invalid API command.")
-            print(
+            logger.error(
+                f"API Command selected: {api_cmd}. This is an invalid API command."
+            )
+            logger.error(
                 f"\nList of API commands:\n{[action.value for action in APIActions]}\n"
             )
 

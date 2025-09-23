@@ -1,7 +1,7 @@
 import os
 import time
 import traceback
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.cuda.amp as amp
@@ -21,7 +21,11 @@ from src.logger import get_logger
 from src.metric_tracker import get_metric_tracker, MetricTracker
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
-from src.util import get_tensor_dtype_from_config, is_device_cpu
+from src.util import (
+    get_logging_level_from_config,
+    get_tensor_dtype_from_config,
+    is_device_cpu,
+)
 
 from torch import nn, Tensor
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
@@ -30,9 +34,18 @@ from torch.utils.data.distributed import DistributedSampler
 
 class Agent:
     def __init__(self) -> None:
+        # Initialize the default distributed process group before doing anything else.
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+            )
+        self.local_rank = 0
         # Setup config and logger, both singletons.
         self.config = get_agent_config()
-        self.logger = get_logger(logging_level=self.config.env.logging_level)
+        self.logger = get_logger(
+            logging_level=get_logging_level_from_config(self.config)
+        )
         self.metric_tracker: MetricTracker | None = None
         self.gpu_profiler = None
         # For file names, start with this prefix
@@ -41,9 +54,9 @@ class Agent:
         self.plot_dir = self.config.agent.plot_directory
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         # Setup hardware settings.
+        self.agent_device = self.config.env.device
         self.setup_cpu_gpu_settings()
         # Setup multi-gpu settings.
-        self.local_rank = 0
         if torch.cuda.device_count() > 1:
             self.setup_distributed()
         # Setup tokenizer.
@@ -55,7 +68,8 @@ class Agent:
         self.data_builder = DattabotDataBuilder()
         # Setup model.
         self.model = DattaBotModel(device=self.agent_device)
-        self.logger.info(f"Model dimensions: {self.config.neural_net.model_dimensions}")
+        self.d_model = self.config.neural_net.model_dimensions
+        self.logger.info(f"Model dimensions: {self.d_model}")
         self.logger.info(
             f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
         )
@@ -77,18 +91,19 @@ class Agent:
             )
         self.model.cuda()
         # Setup training objects.
+        self.train_batch_idx = 0
+        self.val_batch_idx = 0
         self.batch_size = self.config.agent.batch_size
+        self.max_response_tokens = self.config.agent.max_response_tokens
         self.logger.debug(f"Batch size: {self.batch_size}")
-        self.logger.debug(f"Max tokens: {self.config.agent.max_response_tokens}")
+        self.logger.debug(f"Max tokens: {self.max_response_tokens}")
         self.lr = self.config.agent.lr
-        self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=self.config.agent.weight_decay,
         )
-        self.train_batch_idx = 0
-        self.val_batch_idx = 0
+        # Only training epochs, do not include validation epochs.
         self.lr_scheduler = TorchOneCycleLR(
             self.optimizer,
             max_lr=self.lr,
@@ -109,9 +124,15 @@ class Agent:
         #     epsilon=1e-12
         # )
         # Initialize AMP scaler
-        # TODO(PiyushDatta): Turn on AMP scaler after we experiment without it.
-        self.scaler = None
-        # self.scaler = amp.GradScaler()
+        self.scaler = amp.GradScaler()
+        # Initialize AdaptiveLogSoftmaxWithLoss.
+        self.loss_fn = nn.AdaptiveLogSoftmaxWithLoss(
+            in_features=self.d_model,
+            n_classes=self.tokenizer.vocab_size,
+            cutoffs=[10_000, 50_000, self.tokenizer.vocab_size - 1],
+            div_value=4.0,
+            head_bias=False,
+        ).to(self.agent_device)
 
     def setup_distributed(self):
         # Ensure this is running under torchrun.
@@ -123,8 +144,6 @@ class Agent:
         self.logger.debug(
             f"Setting up setup_distributed with local_rank={self.local_rank}"
         )
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
         torch.cuda.set_device(self.local_rank)
         self.agent_device = f"cuda:{self.local_rank}"
 
@@ -148,6 +167,31 @@ class Agent:
         return (
             not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
         )
+
+    def _compute_loss(
+        self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None
+    ) -> Tensor:
+        """
+        Compute loss using loss function.
+        Args:
+            outputs: Tensor of shape (batch_size, seq_len, d_model)
+            targets: Tensor of shape (batch_size, seq_len)
+            mask: Tensor of shape (batch_size, seq_len)
+        Returns:
+            loss: scalar tensor
+        """
+        # flatten to (batch*seq_len, d_model)
+        batch_size, seq_len, d_model = outputs.size()
+        outputs_flat = outputs.view(batch_size * seq_len, d_model)
+        targets_flat = targets.view(batch_size * seq_len)
+        if mask is not None:
+            mask_flat = mask.view(batch_size * seq_len)
+            outputs_flat = outputs_flat[mask_flat]
+            targets_flat = targets_flat[mask_flat]
+        outputs_flat = outputs_flat.to(self.agent_device)
+        targets_flat = targets_flat.to(self.agent_device)
+        loss_output = self.loss_fn(outputs_flat, targets_flat)
+        return loss_output.loss
 
     def new_training_session(self):
         self.logger.info("Agent's training session has begun...")
@@ -211,7 +255,7 @@ class Agent:
         vocab: dict[str, int] = {}
         try:
             self.new_training_session()
-            self.gpu_profiler.log_mem("Training - start training")
+            self.gpu_profiler.log_gpu_memory("Training - start training")
             tokens_processed = 0
             tokens_per_batch = self.batch_size * self.config.agent.max_response_tokens
             max_train_tokens = self.config.agent.max_train_tokens
@@ -231,10 +275,10 @@ class Agent:
                 self.config.agent.num_batches_val_every_epoch
             )
             # Set up data loaders
-            self.gpu_profiler.log_mem("Training - before setup data")
+            self.gpu_profiler.log_gpu_memory("Training - before setup data")
             self.logger.info("Setting up data.")
             train_dataloader, val_dataloader, vocab = self.data_builder.setup_data()
-            self.gpu_profiler.log_mem("Training - after setup data")
+            self.gpu_profiler.log_gpu_memory("Training - after setup data")
             # Actual training algorithm.
             self.logger.info(
                 f"Got training and validation data for dataset {train_dataloader.dataset_name}. Now going into training loop for "
@@ -255,7 +299,7 @@ class Agent:
                     train_dataloader.sampler.set_epoch(curr_epoch_num)
                 if isinstance(val_dataloader.sampler, DistributedSampler):
                     val_dataloader.sampler.set_epoch(curr_epoch_num)
-                self.gpu_profiler.log_mem("Training - before train epoch")
+                self.gpu_profiler.log_gpu_memory("Training - before train epoch")
                 # === Training ===
                 avg_train_loss, train_steps_this_epoch, train_tokens_in_epoch = (
                     self._train_epoch(
@@ -264,10 +308,11 @@ class Agent:
                         num_batches=num_train_batches_per_phase,
                     )
                 )
-                self.gpu_profiler.log_mem("Training - after train epoch")
+                self.gpu_profiler.log_gpu_memory("Training - after train epoch")
                 total_steps += train_steps_this_epoch
                 # Update tokens processed
                 tokens_processed += train_tokens_in_epoch
+                response.num_train_tokens_processed += train_tokens_in_epoch
                 response.num_train_batches += train_steps_this_epoch
                 elapsed = time.time() - train_start_time
                 if self._is_rank_0():
@@ -295,6 +340,7 @@ class Agent:
                     )
                 )
                 tokens_processed += val_tokens_in_epoch
+                response.num_val_tokens_processed += val_tokens_in_epoch
                 response.num_val_batches += val_steps_this_epoch
                 if self._is_rank_0():
                     self.logger.debug(
@@ -305,6 +351,7 @@ class Agent:
                         {
                             "train/loss": avg_train_loss,
                             "val/loss": avg_val_loss,
+                            "train/tokens_processed": tokens_processed,
                         },
                         step=None,
                     )
@@ -371,6 +418,8 @@ class Agent:
         total_params = sum(p.numel() for p in self.model.parameters())
         total_params_millions = total_params // 1_000_000
         self._log_training_details(
+            num_train_tokens_processed=response.num_train_tokens_processed,
+            num_val_tokens_processed=response.num_val_tokens_processed,
             num_train_batches=response.num_train_batches,
             num_val_batches=response.num_val_batches,
             training_score=avg_train_loss,
@@ -403,7 +452,6 @@ class Agent:
         log_and_plot_every_x_steps = (
             self.config.agent.logging_and_plotting_every_x_steps
         )
-        tgt_vocab_size = self.tokenizer.vocab_size
         # Setup progress bar
         progress_bar = tqdm.tqdm(
             range(num_batches), desc=f"Training for epoch {epoch_num}", leave=True
@@ -415,28 +463,31 @@ class Agent:
             input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
                 self.agent_device
             )
+            batch_size = input_ids.shape[0]
             # Attention mask (1 for real tokens, 0 for pad)
             attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
                 self.agent_device
             )
             # Zero the gradients.
             self.optimizer.zero_grad()
-            # Forward + loss, shape: [batch_size, sequence_length, vocab_size]
             with amp.autocast(enabled=(not is_device_cpu(self.agent_device))):
                 # Forward pass.
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                # [batch*seq_len, vocab]
-                logits = logits.view(-1, tgt_vocab_size)
-                labels = labels.view(-1)
+                assert logits.shape == (
+                    batch_size,
+                    self.max_response_tokens,
+                    self.d_model,
+                ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
                 self.logger.debug(
                     f"logits.shape = {logits.shape}, labels.shape = {labels.shape}"
                 )
-                self.gpu_profiler.log_mem("Training - before loss")
-                loss = self.criterion(logits, labels)
-                self.gpu_profiler.log_mem("Training - after loss")
-                # If using CrossEntropyLoss, mask out padding tokens.
+                self.gpu_profiler.log_gpu_memory("Training - before loss")
+                # Calculate loss.
                 padding_mask = labels != self.tokenizer.pad_token_id
-                loss = (loss * padding_mask).sum() / padding_mask.sum()
+                loss = self._compute_loss(
+                    outputs=logits, targets=labels, mask=padding_mask
+                )
+                self.gpu_profiler.log_gpu_memory("Training - after loss")
             # Backprop.
             if self.scaler:
                 self.scaler.scale(loss).backward()
@@ -521,7 +572,6 @@ class Agent:
         total_loss = 0.0
         total_steps = 0
         total_tokens = 0
-        tgt_vocab_size = self.tokenizer.vocab_size
         # Setup progress bar
         progress_bar = tqdm.tqdm(
             range(num_batches), desc=f"Validating for epoch {epoch_num}", leave=True
@@ -534,17 +584,22 @@ class Agent:
                 input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
                     self.agent_device
                 )
+                batch_size = input_ids.shape[0]
                 attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
                     self.agent_device
                 )
-                # Forward + loss, shape: [batch_size, sequence_length, vocab_size]
+                # Forward pass.
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                logits = logits.view(-1, tgt_vocab_size)
-                labels = labels.view(-1)
+                assert logits.shape == (
+                    batch_size,
+                    self.max_response_tokens,
+                    self.d_model,
+                ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
                 # Calculate loss.
-                loss = self.criterion(logits, labels)
                 padding_mask = labels != self.tokenizer.pad_token_id
-                loss = (loss * padding_mask).sum() / padding_mask.sum()
+                loss = self._compute_loss(
+                    outputs=logits, targets=labels, mask=padding_mask
+                )
                 total_loss += loss.item()
                 total_steps += 1
                 total_tokens += input_ids.numel()
@@ -598,18 +653,27 @@ class Agent:
         Returns:
             A list of DattaBotAPIResponse objects (one per query).
         """
-        if not queries:
-            self.logger.warning("No queries provided for inference.")
-            return [
-                DattaBotAPIResponse(
-                    response_dict={"output_text": "No queries to process."}
-                )
-            ]
-
-        self.model.eval()
         responses: list[DattaBotAPIResponse] = []
-
         try:
+            if self.local_rank != 0:
+                self.logger.debug(
+                    "Skipping inference since this is not the main process."
+                )
+                return [
+                    DattaBotAPIResponse(
+                        response_dict={
+                            "output_text": f"Skip, not rank 0, this is rank {self.local_rank}."
+                        }
+                    )
+                ]
+            if not queries:
+                self.logger.warning("No queries provided for inference.")
+                return [
+                    DattaBotAPIResponse(
+                        response_dict={"output_text": "No queries to process."}
+                    )
+                ]
+            self.model.eval()
             self.logger.info(f"Processing {len(queries)} queries for inference.")
             # Record all user queries in history
             for q in queries:
@@ -624,10 +688,25 @@ class Agent:
             ), f"Batch size mismatch: {batch_size} != {len(queries)}"
 
             with torch.no_grad():
-                # shape: (batch_size, seq_len, vocab_size)
+                # Forward pass.
                 logits: Tensor = self.model(batch_tensor)
+                assert logits.shape == (
+                    batch_size,
+                    self.max_response_tokens,
+                    self.d_model,
+                ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
+                batch_size, seq_len, d_model = logits.shape
+                logits_flat = logits.view(batch_size * seq_len, d_model)
+                log_probs = self.loss_fn.log_prob(logits_flat)
+                assert log_probs.shape == (
+                    batch_size * seq_len,
+                    self.tokenizer.vocab_size,
+                ), (
+                    f"log_probs_flat shape mismatch: got {log_probs.shape}, "
+                    f"expected ({batch_size * seq_len}, {self.tokenizer.vocab_size})"
+                )
                 # Greedy decoding → (batch_size, seq_len)
-                predicted_ids: Tensor = torch.argmax(logits, dim=-1)
+                predicted_ids: Tensor = torch.argmax(log_probs, dim=-1)
                 # Decode tokens back into text
                 decoded_responses: list[str] = self.tokenizer.decode(
                     tokens_or_tokens_list=predicted_ids.tolist()
@@ -681,6 +760,8 @@ class Agent:
 
     def _log_training_details(
         self,
+        num_train_tokens_processed: int,
+        num_val_tokens_processed: int,
         num_train_batches: int,
         num_val_batches: int,
         training_score: float,
@@ -704,6 +785,8 @@ class Agent:
                     "summary/batch_size": self.batch_size,
                     "summary/train_batches_completed": num_train_batches,
                     "summary/val_batches_completed": num_val_batches,
+                    "summary/train_tokens_processed": num_train_tokens_processed,
+                    "summary/val_tokens_processed": num_val_tokens_processed,
                     "summary/train_loss": training_score,
                     "summary/val_loss": validation_score,
                     "summary/total_params_millions": total_params_millions,
@@ -733,7 +816,7 @@ class Agent:
         # Encode queries using the tokenizer (batch mode).
         tokenized_queries: list[list[int]] = self.tokenizer.encode(queries)
         # Find max sequence length.
-        max_seq_len = max(len(seq) for seq in tokenized_queries)
+        max_seq_len = self.max_response_tokens
         # Pad each sequence to max_seq_len.
         padded_tensors = [
             (

@@ -1,5 +1,6 @@
 from enum import IntEnum
 from typing import Any, Optional
+
 from torch import Tensor
 
 
@@ -22,6 +23,7 @@ class DattaBotAPIException(Exception):
 
 
 from typing import Any, Optional
+
 from torch import Tensor
 
 
@@ -98,6 +100,22 @@ class DattaBotAPIResponse:
     @num_val_batches.setter
     def num_val_batches(self, value: Optional[int]) -> None:
         self._metadata["num_val_batches"] = value if value is not None else 0
+
+    @property
+    def num_train_tokens_processed(self) -> int:
+        return self._metadata.get("num_train_tokens_processed", 0)
+
+    @num_train_tokens_processed.setter
+    def num_train_tokens_processed(self, value: Optional[int]) -> None:
+        self._metadata["num_train_tokens_processed"] = value if value is not None else 0
+
+    @property
+    def num_val_tokens_processed(self) -> int:
+        return self._metadata.get("num_val_tokens_processed", 0)
+
+    @num_val_tokens_processed.setter
+    def num_val_tokens_processed(self, value: Optional[int]) -> None:
+        self._metadata["num_val_tokens_processed"] = value if value is not None else 0
 
     @property
     def tokenizer_encodings(self) -> list[list[int]]:

@@ -5,6 +5,7 @@ from numpy import sqrt as np_sqrt
 from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import get_tokenizer
+from src.util import get_logging_level_from_config
 from torch import arange, bmm, cat, nn, Tensor
 
 
@@ -13,7 +14,9 @@ class DattaBotModel(nn.Module):
     def __init__(self, device: str = "cpu") -> None:
         super().__init__()
         self.config = get_agent_config()
-        self.logger = get_logger(logging_level=self.config.env.logging_level)
+        self.logger = get_logger(
+            logging_level=get_logging_level_from_config(self.config)
+        )
         self.device = device
         self.vocab_size = get_tokenizer().vocab_size
         assert (
@@ -33,8 +36,6 @@ class DattaBotModel(nn.Module):
             d_model=self.d_model,
         )
         self.final_norm = nn.LayerNorm(self.d_model)
-        self.output_projection = nn.Linear(self.d_model, self.vocab_size, bias=False)
-        self.output_projection.weight = self.token_embedding.weight
 
     def forward(
         self, input_ids: Tensor, attention_mask: Optional[Tensor] = None
@@ -50,16 +51,16 @@ class DattaBotModel(nn.Module):
         pos_ids = (
             arange(seq_len, device=self.device).unsqueeze(0).expand(batch_size, -1)
         )
+        # Embeddings + positional encoding + dropout
         # gpt-style embedding scaling
         output = self.token_embedding(input_ids) * sqrt(self.d_model)
         output = output + self.pos_embedding(pos_ids)
         output = self.emb_dropout(output)
         # apply causal mask inside
         output = self.decoder_stack(output, attention_mask)
-        # final norm + projection
-        output = self.final_norm(output)
-        logits = self.output_projection(output)
-        # [batch, seq_len, vocab_size]
+        # final norm
+        logits = self.final_norm(output)
+        # [batch, seq_len] -> [batch, seq_len, d_model]
         return logits
 
 
@@ -165,7 +166,6 @@ class TransformerMultiHeadAttention(nn.Module):
     def __init__(self, embedded_dim_size: int) -> None:
         super().__init__()
         self.config = get_agent_config()
-        self.logger = get_logger(logging_level=self.config.env.logging_level)
         self.n_heads = self.config.neural_net.n_heads
         self.attention_output_size = embedded_dim_size // self.n_heads
         self.attention_layers = nn.ModuleList(

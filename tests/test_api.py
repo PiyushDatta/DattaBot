@@ -1,13 +1,21 @@
 import sys
+
 import pytest
+import torch.distributed as dist
 from torch import Tensor
 
 # set path to project
 sys.path.append("../dattabot")
 
-from src.api import DattaBotAPI, DattaBotAPIException, DattaBotAPIResponse
 from src.agent_config import get_agent_config
+from src.api import DattaBotAPI, DattaBotAPIException, DattaBotAPIResponse
 from src.logger import get_logger
+
+if not dist.is_initialized():
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+    )
 
 logger = get_logger()
 config = get_agent_config()

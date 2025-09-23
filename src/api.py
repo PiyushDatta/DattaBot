@@ -1,9 +1,10 @@
-from typing import List, Optional
 from traceback import print_exception
+from typing import List, Optional
+
 from openai import OpenAI
 from src.agent import Agent as DattaBotAgent
+from src.api_interface import AgentAction, DattaBotAPIException, DattaBotAPIResponse
 from src.logger import get_logger
-from src.api_interface import AgentAction, DattaBotAPIResponse, DattaBotAPIException
 
 
 class DattaBotAPI:
