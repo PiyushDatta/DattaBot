@@ -193,6 +193,40 @@ class Agent:
         loss_output = self.loss_fn(outputs_flat, targets_flat)
         return loss_output.loss
 
+    def _get_attention_pad_mask(self, input_ids: Tensor) -> Tensor:
+        """
+        Get attention pad mask.
+        Args:
+            input_ids: Tensor of shape (batch_size, seq_len)
+        Returns:
+            mask: Tensor of shape (batch, 1, seq_len, seq_len)
+        """
+        # TODO(PiyushDatta): Figure out what to do with the mask, we are padding the sequences.
+        #                    This is a temporary solution to unblock the flash attention training.
+        return None
+        # Attention mask (1 for real tokens, 0 for pad)
+        batch_size = input_ids.shape[0]
+        seq_len = input_ids.shape[1]
+        # [batch, seq_len]
+        attention_pad_mask = (input_ids != self.tokenizer.pad_token_id).to(
+            self.agent_device
+        )
+        # unsqueeze to create head dim
+        # [batch, seq_len] -> [batch, 1, seq_len]
+        attention_pad_mask = attention_pad_mask.unsqueeze(1)
+        # unsqueeze again to create key/value dim
+        # [batch, 1, seq_len] -> [batch, 1, seq_len, 1]
+        attention_pad_mask = attention_pad_mask.unsqueeze(-1)
+        # expand the last dim to seq_len
+        # [batch, 1, seq_len, 1] -> [batch, 1, seq_len, seq_len]
+        attention_pad_mask = attention_pad_mask.expand(-1, -1, -1, seq_len)
+        expected_shape = (batch_size, 1, seq_len, seq_len)
+        assert attention_pad_mask.shape == expected_shape, (
+            f"Attention mask shape mismatch! "
+            f"Got {attention_pad_mask.shape}, expected {expected_shape}"
+        )
+        return attention_pad_mask
+
     def new_training_session(self):
         self.logger.info("Agent's training session has begun...")
         self.train_batch_idx = 0
@@ -459,20 +493,19 @@ class Agent:
         # Go through all the batches.
         for _ in progress_bar:
             batch = next(dataloader)
-            # [batch, seq_len]
+            # input_ids: [batch, seq_len]
             input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
                 self.agent_device
             )
             batch_size = input_ids.shape[0]
-            # Attention mask (1 for real tokens, 0 for pad)
-            attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
-                self.agent_device
-            )
+            attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
             # Zero the gradients.
             self.optimizer.zero_grad()
             with amp.autocast(enabled=(not is_device_cpu(self.agent_device))):
                 # Forward pass.
-                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = self.model(
+                    input_ids=input_ids, attention_pad_mask=attention_pad_mask
+                )
                 assert logits.shape == (
                     batch_size,
                     self.max_response_tokens,
@@ -585,11 +618,11 @@ class Agent:
                     self.agent_device
                 )
                 batch_size = input_ids.shape[0]
-                attention_mask = (input_ids != self.tokenizer.pad_token_id).to(
-                    self.agent_device
-                )
+                attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
                 # Forward pass.
-                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = self.model(
+                    input_ids=input_ids, attention_pad_mask=attention_pad_mask
+                )
                 assert logits.shape == (
                     batch_size,
                     self.max_response_tokens,

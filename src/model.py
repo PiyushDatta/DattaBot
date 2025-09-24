@@ -1,12 +1,11 @@
 from math import sqrt
 from typing import Optional
 
-from numpy import sqrt as np_sqrt
 from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import get_tokenizer
 from src.util import get_logging_level_from_config
-from torch import arange, bmm, cat, nn, Tensor
+from torch import arange, backends, bfloat16, cat, nn, Tensor
 
 
 # Transformer Model.
@@ -38,13 +37,13 @@ class DattaBotModel(nn.Module):
         self.final_norm = nn.LayerNorm(self.d_model)
 
     def forward(
-        self, input_ids: Tensor, attention_mask: Optional[Tensor] = None
+        self, input_ids: Tensor, attention_pad_mask: Optional[Tensor] = None
     ) -> Tensor:
         self.logger.debug(
             f"Model received the following tensor inputs:\n"
             f"input_ids: {input_ids}, with shape: {input_ids.shape}\n"
-            f"attention_mask: {attention_mask if attention_mask is not None else 'None'}, "
-            f"with shape: {attention_mask.shape if attention_mask is not None else 'N/A'}"
+            f"attention_pad_mask: {attention_pad_mask if attention_pad_mask is not None else 'None'}, "
+            f"with shape: {attention_pad_mask.shape if attention_pad_mask is not None else 'N/A'}"
         )
         # input_ids: [batch, seq_len]
         batch_size, seq_len = input_ids.size()
@@ -57,7 +56,7 @@ class DattaBotModel(nn.Module):
         output = output + self.pos_embedding(pos_ids)
         output = self.emb_dropout(output)
         # apply causal mask inside
-        output = self.decoder_stack(output, attention_mask)
+        output = self.decoder_stack(output, attention_pad_mask)
         # final norm
         logits = self.final_norm(output)
         # [batch, seq_len] -> [batch, seq_len, d_model]
@@ -217,10 +216,11 @@ class TransformerScaledDotProductAttention(nn.Module):
         query: Tensor,
         key: Tensor,
         value: Tensor,
-        mask: Tensor = None,
+        # TODO(PiyushDatta): Figure out what to do with the mask, we are padding the sequences.
+        mask: Optional[Tensor] = None,
     ) -> Tensor:
         # [batch_size, seq_len, d_model]
-        batch_size, tgt_len, _ = query.size()
+        _, tgt_len, _ = query.size()
         sequence_len = key.size()[1]
         assert sequence_len == tgt_len, (
             f"Sequence length must equal target length! "
@@ -233,50 +233,23 @@ class TransformerScaledDotProductAttention(nn.Module):
         # Right now, each "attention head" is wrapped in TransformerMultiHeadAttention,
         # so q/k/v are already split per head. Shapes are [batch, seq_len, head_dim].
         # [batch, 1, seq_len, head_dim]
-        query = query.unsqueeze(1)
-        key = key.unsqueeze(1)
-        value = value.unsqueeze(1)
-        # Build attention padding mask.
-        # SDPA expects a float mask: True/False or -inf/0.0 style.
-        attn_mask = mask
-        if attn_mask is not None:
-            # [batch, seq_len] or [batch, seq_len, seq_len]
-            if attn_mask.dim() == 2:
-                # unsqueeze to create head dim
-                # [batch, seq_len] -> [batch, 1, seq_len]
-                attn_mask = attn_mask.unsqueeze(1)
-                # unsqueeze again to create key/value dim
-                # [batch, 1, seq_len] -> [batch, 1, seq_len, 1]
-                attn_mask = attn_mask.unsqueeze(-1)
-                # expand the last dim to seq_len
-                # [batch, 1, seq_len, 1] -> [batch, 1, seq_len, seq_len]
-                attn_mask = attn_mask.expand(-1, -1, -1, sequence_len)
-            elif attn_mask.dim() == 3:
-                # [batch, seq_len, seq_len] -> [batch, 1, seq_len, seq_len]
-                attn_mask = attn_mask.unsqueeze(1)
-        expected_shape = (batch_size, 1, tgt_len, sequence_len)
-        assert attn_mask.shape == expected_shape, (
-            f"Attention mask shape mismatch! "
-            f"Got {attn_mask.shape}, expected {expected_shape}"
-        )
-        self.logger.debug(
-            f"Inputs for scaled dot product attention:\n"
-            f"query: {query}, with shape: {query.shape}\n"
-            f"key: {key}, with shape: {key.shape}\n"
-            f"value: {value}, with shape: {value.shape}\n"
-            f"attention_mask: {attn_mask if attn_mask is not None else 'None'}, "
-            f"with shape: {attn_mask.shape if attn_mask is not None else 'N/A'}"
-        )
+        original_dtype = query.dtype
+        query = query.unsqueeze(1).to(bfloat16)
+        key = key.unsqueeze(1).to(bfloat16)
+        value = value.unsqueeze(1).to(bfloat16)
         # Use SDPA (dispatches to FlashAttention if available)
-        out = nn.functional.scaled_dot_product_attention(
-            query=query,
-            key=key,
-            value=value,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            # We pad the inputs so we need to use attn_mask.
-            # If we use attn_mask, we cannot use causal mask (is_causal).
-            is_causal=False,
-        )
+        with backends.cuda.sdp_kernel(
+            enable_flash=backends.cuda.flash_sdp_enabled(),
+            enable_math=False,
+            enable_mem_efficient=False,
+        ):
+            out = nn.functional.scaled_dot_product_attention(
+                query=query,
+                key=key,
+                value=value,
+                attn_mask=None,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
         # [batch, 1, seq_len, head_dim] -> [batch, seq_len, head_dim]
-        return out.squeeze(1)
+        return out.squeeze(1).to(original_dtype)
