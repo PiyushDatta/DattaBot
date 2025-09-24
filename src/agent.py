@@ -779,8 +779,8 @@ class Agent:
         if self.metric_tracker.active:
             self.metric_tracker.log_metrics(
                 {
-                    "summary/model_name": model_name,
-                    "summary/dataset_name": dataset_name,
+                    "summary/model_name": str(model_name),
+                    "summary/dataset_name": str(dataset_name),
                     "summary/vocab_length": len(vocab),
                     "summary/batch_size": self.batch_size,
                     "summary/train_batches_completed": num_train_batches,

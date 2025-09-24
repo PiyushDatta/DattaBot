@@ -196,6 +196,9 @@ class TransformerScaledDotProductAttention(nn.Module):
     def __init__(self, output_size, embedded_dim_size: int) -> None:
         super().__init__()
         self.config = get_agent_config()
+        self.logger = get_logger(
+            logging_level=get_logging_level_from_config(self.config)
+        )
         self.output_size = output_size
         self.pad_id = get_tokenizer().pad_token_id
         self.query_layer = nn.Linear(
@@ -208,39 +211,72 @@ class TransformerScaledDotProductAttention(nn.Module):
             in_features=embedded_dim_size, out_features=output_size
         )
         self.dropout = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
-        self.softmax = nn.Softmax(dim=-1)
 
     def forward(
         self,
         query: Tensor,
         key: Tensor,
         value: Tensor,
-        # mask = batch size * sequence length
         mask: Tensor = None,
     ) -> Tensor:
-        # Tensor input is 3D tensor.
-        # [batch_size, sequence_size, embedding_table_size]
+        # [batch_size, seq_len, d_model]
         batch_size, tgt_len, _ = query.size()
         sequence_len = key.size()[1]
+        assert sequence_len == tgt_len, (
+            f"Sequence length must equal target length! "
+            f"Got {sequence_len}, expected {tgt_len}"
+        )
         query = self.query_layer(query)
         key = self.key_layer(key)
         value = self.value_layer(value)
-        dim_k = key.size(-1)
-        # Transpose keys. K^T.
-        key = key.transpose(1, 2)
-        # Get dot product of queries with all keys.
-        # Then divide by sqrt of model_dimensions (d_k).
-        # This covers the first matmul and scale blocks inside ScaledDotProductAttention.
-        dot_product_score = bmm(input=query, mat2=key) / np_sqrt(dim_k)
-        # Apply masking (optional).
-        if mask is not None:
-            # mask = batch size * sequence length * sequence length
-            expanded_mask = mask[:, None, :].expand(batch_size, tgt_len, sequence_len)
-            dot_product_score = dot_product_score.masked_fill(
-                expanded_mask == self.pad_id, -float("Inf")
-            )
-        # Apply softmax.
-        attention_score = self.softmax(dot_product_score)
-        attention_score = self.dropout(attention_score)
-        # Matmul of our values and final attention score.
-        return bmm(input=attention_score, mat2=value)
+        # PyTorch SDPA expects [batch, n_heads, seq, head_dim]
+        # Right now, each "attention head" is wrapped in TransformerMultiHeadAttention,
+        # so q/k/v are already split per head. Shapes are [batch, seq_len, head_dim].
+        # [batch, 1, seq_len, head_dim]
+        query = query.unsqueeze(1)
+        key = key.unsqueeze(1)
+        value = value.unsqueeze(1)
+        # Build attention padding mask.
+        # SDPA expects a float mask: True/False or -inf/0.0 style.
+        attn_mask = mask
+        if attn_mask is not None:
+            # [batch, seq_len] or [batch, seq_len, seq_len]
+            if attn_mask.dim() == 2:
+                # unsqueeze to create head dim
+                # [batch, seq_len] -> [batch, 1, seq_len]
+                attn_mask = attn_mask.unsqueeze(1)
+                # unsqueeze again to create key/value dim
+                # [batch, 1, seq_len] -> [batch, 1, seq_len, 1]
+                attn_mask = attn_mask.unsqueeze(-1)
+                # expand the last dim to seq_len
+                # [batch, 1, seq_len, 1] -> [batch, 1, seq_len, seq_len]
+                attn_mask = attn_mask.expand(-1, -1, -1, sequence_len)
+            elif attn_mask.dim() == 3:
+                # [batch, seq_len, seq_len] -> [batch, 1, seq_len, seq_len]
+                attn_mask = attn_mask.unsqueeze(1)
+        expected_shape = (batch_size, 1, tgt_len, sequence_len)
+        assert attn_mask.shape == expected_shape, (
+            f"Attention mask shape mismatch! "
+            f"Got {attn_mask.shape}, expected {expected_shape}"
+        )
+        self.logger.debug(
+            f"Inputs for scaled dot product attention:\n"
+            f"query: {query}, with shape: {query.shape}\n"
+            f"key: {key}, with shape: {key.shape}\n"
+            f"value: {value}, with shape: {value.shape}\n"
+            f"attention_mask: {attn_mask if attn_mask is not None else 'None'}, "
+            f"with shape: {attn_mask.shape if attn_mask is not None else 'N/A'}"
+        )
+        # Use SDPA (dispatches to FlashAttention if available)
+        out = nn.functional.scaled_dot_product_attention(
+            query=query,
+            key=key,
+            value=value,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            # We pad the inputs so we need to use attn_mask.
+            # If we use attn_mask, we cannot use causal mask (is_causal).
+            is_causal=False,
+        )
+        # [batch, 1, seq_len, head_dim] -> [batch, seq_len, head_dim]
+        return out.squeeze(1)
