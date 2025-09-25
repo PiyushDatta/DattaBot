@@ -145,16 +145,12 @@ class TransformerPositionWiseFeedForward(nn.Module):
         self.d_model = self.config.neural_net.model_dimensions
         self.linear_one = nn.Linear(self.d_model, self.config.neural_net.hidden_layers)
         self.linear_two = nn.Linear(self.config.neural_net.hidden_layers, self.d_model)
-        # TODO(PiyushDatta): Test with relu vs gelu.
-        # self.relu_layer = nn.ReLU()
         self.gelu_layer = nn.GELU()
         self.dropout_one = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
         self.dropout_two = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
 
     def forward(self, src_input) -> Tensor:
         output = self.linear_one(src_input)
-        # TODO(PiyushDatta): Test with relu vs gelu.
-        # output = self.relu_layer(output)
         output = self.gelu_layer(output)
         output = self.dropout_one(output)
         output = self.linear_two(output)
