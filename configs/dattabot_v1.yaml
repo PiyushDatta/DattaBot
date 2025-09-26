@@ -6,7 +6,7 @@ neural_net:
     zeroed_drop_probability: 0.1
 agent:
     batch_size: 32
-    max_response_tokens: 256
+    max_response_tokens: 512
     max_training_num_epochs: 10_000
     max_train_tokens: 5_000_000_000
     max_train_time_hours: 4
