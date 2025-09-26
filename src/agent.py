@@ -66,21 +66,23 @@ class Agent:
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
         # Setup data loader.
         self.data_builder = DattabotDataBuilder()
-        # Setup model.
-        self.model = DattaBotModel(device=self.agent_device)
+        # Setup model. We pass in tensor_dtype to the model, but remember we
+        # may use AMP below which will have all tensors as float16/bfloat16.
+        self.model = DattaBotModel(device=self.agent_device, dtype=self.tensor_dtype)
+        self.model.to(device=self.agent_device, dtype=self.tensor_dtype)
+        self.logger.info(f"Model is on: {self.agent_device}")
         self.d_model = self.config.neural_net.model_dimensions
         self.logger.info(f"Model dimensions: {self.d_model}")
         self.logger.info(
             f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
         )
-        # Load the model to our device.
-        self.model = self.model.to(self.agent_device)
         # Load model weights
         self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
         load_agent(
             model=self.model,
             filepath=self.weights_fname,
             logger=self.logger,
+            device=self.agent_device,
         )
         # Wrap with distributed layer if we have multiple gpus.
         if torch.cuda.device_count() > 1:
@@ -135,12 +137,11 @@ class Agent:
         ).to(self.agent_device)
 
     def setup_distributed(self):
+        assert (
+            dist.is_initialized() == True
+        ), "Distributed process group is not initialized. Please call dist.is_initialized() first."
         # Ensure this is running under torchrun.
-        assert "LOCAL_RANK" in os.environ, (
-            "LOCAL_RANK environment variable not found. "
-            "You must run using `torchrun --nproc_per_node=N ...` for distributed training. See README for more information."
-        )
-        self.local_rank = int(os.environ["LOCAL_RANK"])
+        self.local_rank = dist.get_rank()
         self.logger.debug(
             f"Setting up setup_distributed with local_rank={self.local_rank}"
         )
@@ -501,7 +502,10 @@ class Agent:
             attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
             # Zero the gradients.
             self.optimizer.zero_grad()
-            with amp.autocast(enabled=(not is_device_cpu(self.agent_device))):
+            with amp.autocast(
+                enabled=(not is_device_cpu(self.agent_device)),
+                dtype=torch.bfloat16,
+            ):
                 # Forward pass.
                 logits = self.model(
                     input_ids=input_ids, attention_pad_mask=attention_pad_mask
@@ -514,8 +518,8 @@ class Agent:
                 self.logger.debug(
                     f"logits.shape = {logits.shape}, labels.shape = {labels.shape}"
                 )
-                self.gpu_profiler.log_gpu_memory("Training - before loss")
                 # Calculate loss.
+                self.gpu_profiler.log_gpu_memory("Training - before loss")
                 padding_mask = labels != self.tokenizer.pad_token_id
                 loss = self._compute_loss(
                     outputs=logits, targets=labels, mask=padding_mask
@@ -619,20 +623,24 @@ class Agent:
                 )
                 batch_size = input_ids.shape[0]
                 attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
-                # Forward pass.
-                logits = self.model(
-                    input_ids=input_ids, attention_pad_mask=attention_pad_mask
-                )
-                assert logits.shape == (
-                    batch_size,
-                    self.max_response_tokens,
-                    self.d_model,
-                ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
-                # Calculate loss.
-                padding_mask = labels != self.tokenizer.pad_token_id
-                loss = self._compute_loss(
-                    outputs=logits, targets=labels, mask=padding_mask
-                )
+                with amp.autocast(
+                    enabled=(not is_device_cpu(self.agent_device)),
+                    dtype=torch.bfloat16,
+                ):
+                    # Forward pass.
+                    logits = self.model(
+                        input_ids=input_ids, attention_pad_mask=attention_pad_mask
+                    )
+                    assert logits.shape == (
+                        batch_size,
+                        self.max_response_tokens,
+                        self.d_model,
+                    ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
+                    # Calculate loss.
+                    padding_mask = labels != self.tokenizer.pad_token_id
+                    loss = self._compute_loss(
+                        outputs=logits, targets=labels, mask=padding_mask
+                    )
                 total_loss += loss.item()
                 total_steps += 1
                 total_tokens += input_ids.numel()

@@ -2,6 +2,7 @@ import logging
 
 from omegaconf import DictConfig
 from torch import (
+    bfloat16 as torch_bfloat16,
     dtype as torch_dtype,
     float16 as torch_float16,
     float32 as torch_float32,
@@ -36,7 +37,8 @@ def get_tensor_dtype_from_config(config: DictConfig) -> torch_dtype:
         return torch_float32
     elif config_tensor_dtype == "float16":
         return torch_float16
-
+    elif config_tensor_dtype == "bfloat16":
+        return torch_bfloat16
     assert 0, f"Unsupported tensor dtype: {config_tensor_dtype}."
     return None
 

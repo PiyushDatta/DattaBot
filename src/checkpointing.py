@@ -1,6 +1,7 @@
-from typing import Optional
-import torch
 import os
+from typing import Optional
+
+import torch
 
 from src.logger import DattaBotLogger
 from src.model import DattaBotModel
@@ -66,7 +67,7 @@ def load_agent(
             return {}
         # Load weights
         logger.info(f"Model weights found at {filepath}, loading weights...")
-        checkpoint = torch.load(filepath, map_location=device)
+        checkpoint = torch.load(filepath, map_location=torch.device(device or "cpu"))
         # Handle structured vs direct state dict
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             # Load from structured checkpoint

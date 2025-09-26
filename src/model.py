@@ -5,18 +5,19 @@ from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import get_tokenizer
 from src.util import get_logging_level_from_config
-from torch import arange, backends, bfloat16, cat, nn, Tensor
+from torch import arange, backends, cat, dtype, nn, Tensor
 
 
 # Transformer Model.
 class DattaBotModel(nn.Module):
-    def __init__(self, device: str = "cpu") -> None:
+    def __init__(self, device: str = "cpu", dtype: dtype = "float32") -> None:
         super().__init__()
         self.config = get_agent_config()
         self.logger = get_logger(
             logging_level=get_logging_level_from_config(self.config)
         )
         self.device = device
+        self.dtype = dtype
         self.vocab_size = get_tokenizer().vocab_size
         assert (
             self.vocab_size is not None and self.vocab_size > 0
@@ -229,10 +230,9 @@ class TransformerScaledDotProductAttention(nn.Module):
         # Right now, each "attention head" is wrapped in TransformerMultiHeadAttention,
         # so q/k/v are already split per head. Shapes are [batch, seq_len, head_dim].
         # [batch, 1, seq_len, head_dim]
-        original_dtype = query.dtype
-        query = query.unsqueeze(1).to(bfloat16)
-        key = key.unsqueeze(1).to(bfloat16)
-        value = value.unsqueeze(1).to(bfloat16)
+        query = query.unsqueeze(1)
+        key = key.unsqueeze(1)
+        value = value.unsqueeze(1)
         # Use SDPA (dispatches to FlashAttention if available)
         with backends.cuda.sdp_kernel(
             enable_flash=backends.cuda.flash_sdp_enabled(),
@@ -248,4 +248,4 @@ class TransformerScaledDotProductAttention(nn.Module):
                 is_causal=True,
             )
         # [batch, 1, seq_len, head_dim] -> [batch, seq_len, head_dim]
-        return out.squeeze(1).to(original_dtype)
+        return out.squeeze(1)

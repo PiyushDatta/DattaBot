@@ -22,7 +22,7 @@ agent:
     weight_decay: 0.1
     data_directory: "dattabot_data_dir"
     plot_directory: "dattabot_data_dir/plots"
-    logging_and_plotting_every_x_steps: 20
+    logging_and_plotting_every_x_steps: 30
     validation_save_weights_every_x_batches: 100
     validation_no_save_weights_every_x_batches: 10
     num_batches_train_every_epoch: 64
@@ -38,5 +38,5 @@ env:
     plot_validation: false
     validating_episodes: 100
     logging_level: "INFO"
-    tensor_dtype: "float16"
+    tensor_dtype: "float32"
     dataset_name: "financeqa"

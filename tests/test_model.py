@@ -1,7 +1,9 @@
 import pytest
 import torch
+import torch.cuda.amp as amp
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
+from src.util import is_device_cpu
 
 
 @pytest.mark.parametrize("batch_size,seq_len", [(2, 4), (3, 8)])
@@ -23,12 +25,15 @@ def test_decoder_only_forward(batch_size, seq_len):
     assert labels.shape == (batch_size, seq_len)
 
     # Foward pass.
-    logits = model(input_ids)
-    assert isinstance(logits, torch.Tensor)
-    assert logits.shape == (batch_size, seq_len, d_model)
+    with amp.autocast(
+        enabled=True,
+        dtype=torch.bfloat16,
+    ):
+        logits = model(input_ids)
+        assert isinstance(logits, torch.Tensor)
+        assert logits.shape == (batch_size, seq_len, d_model)
+        loss = logits.mean()
 
-    # Backward pass should work
-    loss = logits.mean()
     # Backward pass.
     loss.backward()
     for p in model.parameters():
