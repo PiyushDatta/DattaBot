@@ -9,6 +9,7 @@ from src.util import is_device_cpu
 @pytest.mark.parametrize("batch_size,seq_len", [(2, 4), (3, 8)])
 def test_decoder_only_forward(batch_size, seq_len):
     model = DattaBotModel()
+    model.eval()
     tokenizer = get_tokenizer()
     d_model = model.d_model
     # Fake batch of token IDs in vocab range.

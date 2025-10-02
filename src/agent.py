@@ -1,6 +1,6 @@
-import os
 import time
 import traceback
+from datetime import timedelta
 from typing import Optional
 
 import torch
@@ -39,6 +39,8 @@ class Agent:
             dist.init_process_group(
                 backend="nccl",
                 init_method="env://",
+                # 30 minutes.
+                timeout=timedelta(seconds=1800),
             )
         self.local_rank = 0
         # Setup config and logger, both singletons.
@@ -356,12 +358,12 @@ class Agent:
                         f"tokens_processed={tokens_processed:,}"
                     )
                 # Stop conditions
-                if tokens_processed >= max_train_tokens:
+                if max_train_tokens != -1 and tokens_processed >= max_train_tokens:
                     self.logger.info(
                         f"Reached {tokens_processed:,} tokens. Stopping training."
                     )
                     break
-                if elapsed >= max_train_time:
+                if max_train_time != -1 and elapsed >= max_train_time:
                     self.logger.info(
                         f"Reached {elapsed/3600:.2f} hours. Stopping training."
                     )
@@ -549,8 +551,12 @@ class Agent:
             # Update metrics
             total_loss += loss.item()
             total_steps += 1
-            total_tokens += input_ids.numel()
+            # Count only non-pad tokens
+            total_tokens += padding_mask.sum().item()
             avg_loss = total_loss / total_steps
+            loss_per_token = (
+                total_loss / total_tokens if total_tokens > 0 else float("inf")
+            )
             # Update progress bar
             progress_bar.set_postfix(
                 {
@@ -565,6 +571,7 @@ class Agent:
                         "train/batch_loss": loss.item(),
                         "train/batch_perplexity": torch.exp(loss).item(),
                         "train/learning_rate": self.optimizer.param_groups[0]["lr"],
+                        "train/loss_per_token": loss_per_token,
                     },
                     step=None,
                 )
@@ -574,6 +581,7 @@ class Agent:
                         f"loss={loss.item():.4f}, "
                         f"perplexity={torch.exp(loss).item():.2f}, "
                         f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
+                        f"loss/token={loss_per_token:.4f}"
                     )
                     latest_metrics = self.gpu_profiler.get_latest_metrics()
                     if latest_metrics:
@@ -643,8 +651,12 @@ class Agent:
                     )
                 total_loss += loss.item()
                 total_steps += 1
-                total_tokens += input_ids.numel()
+                # Count only non-pad tokens
+                total_tokens += padding_mask.sum().item()
                 avg_loss = total_loss / total_steps
+                loss_per_token = (
+                    total_loss / total_tokens if total_tokens > 0 else float("inf")
+                )
                 perplexity = torch.exp(torch.tensor(avg_loss)).item()
                 # Update progress bar.
                 progress_bar.set_postfix(
@@ -659,6 +671,7 @@ class Agent:
                         {
                             "val/batch_loss": loss.item(),
                             "val/batch_perplexity": torch.exp(loss).item(),
+                            "val/loss_per_token": loss_per_token,
                         },
                         step=None,
                     )
@@ -729,25 +742,19 @@ class Agent:
             ), f"Batch size mismatch: {batch_size} != {len(queries)}"
 
             with torch.no_grad():
-                # Forward pass.
-                logits: Tensor = self.model(batch_tensor)
-                assert logits.shape == (
-                    batch_size,
-                    self.max_response_tokens,
-                    self.d_model,
-                ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
-                batch_size, seq_len, d_model = logits.shape
-                logits_flat = logits.view(batch_size * seq_len, d_model)
-                log_probs = self.loss_fn.log_prob(logits_flat)
-                assert log_probs.shape == (
-                    batch_size * seq_len,
-                    self.tokenizer.vocab_size,
-                ), (
-                    f"log_probs_flat shape mismatch: got {log_probs.shape}, "
-                    f"expected ({batch_size * seq_len}, {self.tokenizer.vocab_size})"
-                )
+                with amp.autocast(
+                    enabled=(not is_device_cpu(self.agent_device)),
+                    dtype=torch.bfloat16,
+                ):
+                    # Forward pass.
+                    logits: Tensor = self.model(batch_tensor)
+                    assert logits.shape == (
+                        batch_size,
+                        self.max_response_tokens,
+                        self.d_model,
+                    ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
                 # Greedy decoding → (batch_size, seq_len)
-                predicted_ids: Tensor = torch.argmax(log_probs, dim=-1)
+                predicted_ids: Tensor = torch.argmax(logits, dim=-1)
                 # Decode tokens back into text
                 decoded_responses: list[str] = self.tokenizer.decode(
                     tokens_or_tokens_list=predicted_ids.tolist()
