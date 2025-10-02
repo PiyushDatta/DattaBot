@@ -151,7 +151,12 @@ class Agent:
         self.agent_device = f"cuda:{self.local_rank}"
 
     def setup_cpu_gpu_settings(self):
-        # Optimize memory allocation
+        # torch.manual seed(3407) is all you need
+        # https://arxiv.org/pdf/2109.08203
+        seed = 3407
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
