@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import timedelta
 
 import torch.distributed as dist
@@ -54,6 +55,7 @@ def get_logging_level_from_config(config: DictConfig) -> int:
 
 
 def setup_torch_dist_init():
+    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     if not dist.is_initialized():
         dist.init_process_group(
             backend="nccl",
