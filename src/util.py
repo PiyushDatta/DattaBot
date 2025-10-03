@@ -1,4 +1,7 @@
 import logging
+from datetime import timedelta
+
+import torch.distributed as dist
 
 from omegaconf import DictConfig
 from torch import (
@@ -48,3 +51,13 @@ def get_logging_level_from_config(config: DictConfig) -> int:
     if isinstance(logging_level, str):
         logging_level = logging.getLevelName(logging_level)
     return logging_level
+
+
+def setup_torch_dist_init():
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            # 60 minutes.
+            timeout=timedelta(seconds=3600),
+        )

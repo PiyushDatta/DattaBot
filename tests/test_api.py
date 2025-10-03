@@ -10,13 +10,9 @@ sys.path.append("../dattabot")
 from src.agent_config import get_agent_config
 from src.api import DattaBotAPI, DattaBotAPIException, DattaBotAPIResponse
 from src.logger import get_logger
+from src.util import setup_torch_dist_init
 
-if not dist.is_initialized():
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-    )
-
+setup_torch_dist_init()
 logger = get_logger()
 config = get_agent_config()
 datta_bot_api = DattaBotAPI()

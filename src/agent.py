@@ -1,6 +1,5 @@
 import time
 import traceback
-from datetime import timedelta
 from typing import Optional
 
 import torch
@@ -25,6 +24,7 @@ from src.util import (
     get_logging_level_from_config,
     get_tensor_dtype_from_config,
     is_device_cpu,
+    setup_torch_dist_init,
 )
 
 from torch import nn, Tensor
@@ -35,13 +35,7 @@ from torch.utils.data.distributed import DistributedSampler
 class Agent:
     def __init__(self) -> None:
         # Initialize the default distributed process group before doing anything else.
-        if not dist.is_initialized():
-            dist.init_process_group(
-                backend="nccl",
-                init_method="env://",
-                # 30 minutes.
-                timeout=timedelta(seconds=1800),
-            )
+        setup_torch_dist_init()
         self.local_rank = 0
         # Setup config and logger, both singletons.
         self.config = get_agent_config()
