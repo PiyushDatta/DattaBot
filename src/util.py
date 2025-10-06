@@ -1,19 +1,16 @@
 import logging
 import os
 from datetime import timedelta
-
-import torch.distributed as dist
-
+from enum import Enum
 from omegaconf import DictConfig
-from torch import (
-    bfloat16 as torch_bfloat16,
-    dtype as torch_dtype,
-    float16 as torch_float16,
-    float32 as torch_float32,
-    float64 as torch_float64,
-    int32 as torch_int32,
-    int64 as torch_int64,
-)
+
+
+class DatasetType(Enum):
+    OPENWEBTEXT = "openwebtext"
+    AG_NEWS = "ag_news"
+    WIKITEXT = "wikitext"
+    FINANCEQA = "financeqa"
+    MMLU_REDUX = "mmlu_redux"
 
 
 def is_device_cpu(agent_device: str):
@@ -29,7 +26,17 @@ class Singleton(type):
         return cls._instances[cls]
 
 
-def get_tensor_dtype_from_config(config: DictConfig) -> torch_dtype:
+def get_tensor_dtype_from_config(config: DictConfig):
+    """Get torch dtype from config - imports torch only when called"""
+    from torch import (
+        bfloat16 as torch_bfloat16,
+        float16 as torch_float16,
+        float32 as torch_float32,
+        float64 as torch_float64,
+        int32 as torch_int32,
+        int64 as torch_int64,
+    )
+
     config_tensor_dtype: str = config.env.tensor_dtype
     if config_tensor_dtype == "int64":
         return torch_int64
@@ -55,8 +62,11 @@ def get_logging_level_from_config(config: DictConfig) -> int:
 
 
 def setup_torch_dist_init():
-    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
-    if not dist.is_initialized():
+    """Initialize torch distributed - imports only when called"""
+    import torch.distributed as dist
+
+    if dist.is_available() and not dist.is_initialized():
+        os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
         dist.init_process_group(
             backend="nccl",
             init_method="env://",

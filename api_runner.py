@@ -15,6 +15,7 @@ class APIActions(Enum):
     GET_DECODING = "get_decoding"
     GET_TENSOR_ENCODING = "get_tensor_encoding"
     TRAIN_AGENT = "train_agent"
+    GET_RANDOM_VALIDATION_EXAMPLE = "get_random_validation_example"
 
 
 def process_api_cmd(api_cmd: str, api_args: list[str]):
@@ -33,10 +34,7 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
             queries = api_args.split(DELIMITER)
             # Strip whitespace from each query.
             queries = [query.strip() for query in queries]
-            responses: list[DattaBotAPIResponse] = api_client.respond_to_queries(
-                queries=queries
-            )
-            print(responses)
+            print(api_client.respond_to_queries(queries=queries))
         case APIActions.GET_ENCODING.name:
             print(api_client.get_encoding(queries=api_args))
         case APIActions.GET_DECODING.name:
@@ -45,6 +43,12 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
             print(api_client.get_tensor_encoding(queries=api_args))
         case APIActions.TRAIN_AGENT.name:
             print(api_client.train_agent())
+        case APIActions.GET_RANDOM_VALIDATION_EXAMPLE.name:
+            response: DattaBotAPIResponse = api_client.get_random_validation_example()
+            raw_text = response.raw_text
+            print(
+                f"Raw text from validation example. Sequence length of raw text: {len(raw_text)}.\n=====START=====\n{raw_text}\n=====END====="
+            )
         case _:
             logger.error(
                 f"API Command selected: {api_cmd}. This is an invalid API command."

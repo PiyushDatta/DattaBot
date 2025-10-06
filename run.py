@@ -5,27 +5,28 @@ import sys
 from api_runner import APIActions
 
 
-def detect_num_gpus():
-    """Detect number of GPUs using nvidia-smi or PyTorch fallback."""
-    try:
-        import torch
-
-        num_gpus = torch.cuda.device_count()
-        if num_gpus > 0:
-            return num_gpus
-    except ImportError:
-        pass
-
+def detect_num_gpus() -> int:
+    """Detect number of GPUs using nvidia-smi first, then PyTorch as fallback."""
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=count", "--format=csv,noheader"],
             capture_output=True,
             text=True,
             check=True,
         )
-        gpus = [line for line in result.stdout.splitlines() if line.strip()]
-        return len(gpus)
+        num_gpus = int(result.stdout.strip() or 0)
+        if num_gpus > 0:
+            return num_gpus
     except Exception:
+        pass
+
+    # Try torch.
+    try:
+        import torch
+
+        num_gpus = torch.cuda.device_count()
+        return num_gpus
+    except ImportError:
         return 0
 
 
@@ -34,7 +35,7 @@ def process_api_cmd(api_cmd: str, api_args: str):
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
 
-    if num_gpus > 0:
+    if num_gpus > 1:
         print(f"Detected {num_gpus} GPUs, running distributed with torchrun...")
         cmd = [
             sys.executable,
@@ -52,6 +53,17 @@ def process_api_cmd(api_cmd: str, api_args: str):
             "--api_args",
             api_args,
         ]
+    elif num_gpus == 1:
+        print("Single GPU detected, running without torchrun for faster startup.")
+        cmd = [
+            sys.executable,
+            "api_runner.py",
+            "--api_cmd",
+            api_cmd,
+            "--api_args",
+            api_args,
+        ]
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     else:
         print("No GPUs detected, running client normally on CPU.")
         cmd = [sys.executable, "client.py"]
@@ -65,7 +77,7 @@ def run_client():
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
 
-    if num_gpus > 0:
+    if num_gpus > 1:
         print(f"Detected {num_gpus} GPUs, running distributed with torchrun...")
         cmd = [
             sys.executable,
@@ -79,8 +91,12 @@ def run_client():
             "--rdzv_endpoint=localhost:29500",
             "client.py",
         ]
+    elif num_gpus == 1:
+        print("Single GPU detected, running client directly (no torchrun).")
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        cmd = [sys.executable, "client.py"]
     else:
-        print("No GPUs detected, running client normally on CPU.")
+        print("No GPUs detected, running client on CPU.")
         cmd = [sys.executable, "client.py"]
 
     print("Running command:", " ".join(cmd))
@@ -92,20 +108,18 @@ def run_tests(test_name: str = "all"):
     if test_name not in (None, "", "all"):
         test_target = os.path.join("tests", test_name)
 
-    command = [
-        sys.executable,
-        "-m",
-        "pytest",
-        test_target,
-        "-v",
-    ]
+    command = [sys.executable, "-m", "pytest", test_target, "-v"]
 
     env = os.environ.copy()
-    env["LOCAL_RANK"] = "0"
-    env["RANK"] = "0"
-    env["WORLD_SIZE"] = "1"
-    env["MASTER_ADDR"] = "127.0.0.1"
-    env["MASTER_PORT"] = "29500"
+    env.update(
+        {
+            "LOCAL_RANK": "0",
+            "RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "127.0.0.1",
+            "MASTER_PORT": "29500",
+        }
+    )
 
     print(f"Running command: {' '.join(command)}")
     try:
@@ -138,7 +152,6 @@ def main():
     )
 
     args = parser.parse_args()
-
     if args.test is not None:
         run_tests(test_name=args.test)
     elif args.api_cmd:

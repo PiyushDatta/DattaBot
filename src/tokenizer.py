@@ -5,6 +5,7 @@ Default: HarmonyTokenizer (o200k_harmony)
 
 import tiktoken
 from typing import Optional, Union
+from functools import cached_property
 
 
 class DattaBotTokenizer:
@@ -72,35 +73,57 @@ class DattaBotTokenizer:
         )
 
     # --- Public API ---
+
+    @cached_property
+    def special_tokens(self) -> set[str]:
+        """
+        Returns all special token strings for the tokenizer.
+        Includes BOS, EOS, PAD, and any other reserved tokens.
+        """
+        return set(self._tokenizer._special_tokens.keys())
+
     def encode(
-        self, text_or_texts: Union[str, list[str]]
+        self,
+        text_or_texts: Union[str, list[str]],
+        with_special_tokens: bool = True,
+        **kwargs,
     ) -> Union[list[int], list[list[int]]]:
         """
         Encode a single string or a list of strings.
-        Automatically adds BOS/EOS tokens.
+
+        Args:
+            text_or_texts: Input string or list of strings.
+            with_special_tokens: Whether to prepend BOS and append EOS tokens.
+            **kwargs: Passed directly to the underlying tokenizer.encode, e.g., allowed_special.
+
         Returns:
             - list[int] for a single string
             - list[list[int]] for a list of strings
         """
-        if isinstance(text_or_texts, str):
-            return (
-                [self.bos_token_id]
-                + self._tokenizer.encode(text_or_texts)
-                + [self.eos_token_id]
+
+        def encode_single(text: str) -> list[int]:
+            tokens = self._tokenizer.encode(
+                text, allowed_special=self.special_tokens, **kwargs
             )
+            if with_special_tokens:
+                tokens = [self.bos_token_id] + tokens + [self.eos_token_id]
+            return tokens
+
+        if isinstance(text_or_texts, str):
+            return encode_single(text_or_texts)
         elif isinstance(text_or_texts, list):
-            return [
-                [self.bos_token_id] + self._tokenizer.encode(text) + [self.eos_token_id]
-                for text in text_or_texts
-            ]
+            return [encode_single(text) for text in text_or_texts]
         else:
             raise TypeError(f"Expected str or list[str], got {type(text_or_texts)}")
 
     def decode(
-        self, tokens_or_tokens_list: Union[list[int], list[list[int]]]
+        self, tokens_or_tokens_list: Union[list[int], list[list[int]]], **kwargs
     ) -> Union[str, list[str]]:
         """
         Decode a single list of token IDs or a list of lists of token IDs.
+
+        Additional kwargs are passed directly to the underlying tokenizer.decode.
+
         Returns:
             - str for a single list of token IDs
             - list[str] for a list of lists of token IDs
@@ -108,11 +131,14 @@ class DattaBotTokenizer:
         if isinstance(tokens_or_tokens_list, list) and all(
             isinstance(t, int) for t in tokens_or_tokens_list
         ):
-            return self._tokenizer.decode(tokens_or_tokens_list)
+            return self._tokenizer.decode(tokens_or_tokens_list, **kwargs)
         elif isinstance(tokens_or_tokens_list, list) and all(
             isinstance(t, list) for t in tokens_or_tokens_list
         ):
-            return [self._tokenizer.decode(tokens) for tokens in tokens_or_tokens_list]
+            return [
+                self._tokenizer.decode(tokens, **kwargs)
+                for tokens in tokens_or_tokens_list
+            ]
         else:
             raise TypeError(
                 f"Expected list[int] or list[list[int]], got {type(tokens_or_tokens_list)}"

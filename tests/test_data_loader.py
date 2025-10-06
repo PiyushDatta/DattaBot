@@ -1,90 +1,129 @@
 from unittest.mock import MagicMock, patch
-
 import pytest
-import torch
-from src.agent_config import get_agent_config
 from src.data_loader import (
-    DatasetType,
     DattabotDataBuilder,
     DattabotDataLoader,
     string_to_enum,
-    TextDataset,
+    _create_text_dataset_class,
 )
-from src.tokenizer import get_tokenizer
+from src.util import DatasetType
 from torch import Tensor
 
 
 # --- Fixtures ---
 @pytest.fixture
 def tokenizer():
-    return get_tokenizer()
+    # Mock tokenizer that returns token ids for strings
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.encode = lambda text: [ord(c) for c in str(text)]
+    mock_tokenizer.decode = lambda tokens: "".join(chr(t) for t in tokens)
+    mock_tokenizer.vocab = {str(i): i for i in range(256)}
+    mock_tokenizer.eos_token_id = 0
+    mock_tokenizer.pad_token_id = 1
+    return mock_tokenizer
 
 
 @pytest.fixture
 def sample_texts():
-    return ["Hello world!", "Testing GPT data loader.", "PyTorch is fun!"]
+    # Format as list of dicts to match data_loader.py expectation
+    return [
+        {"text": "Hello world!"},
+        {"text": "Testing GPT data loader."},
+        {"text": "PyTorch is fun!"},
+    ]
 
 
 # --- TextDataset Tests ---
 def test_text_dataset_basic(tokenizer, sample_texts):
-    seq_len = 10
-    ds = TextDataset(sample_texts, tokenizer, seq_length=seq_len)
-    assert len(ds) == len(sample_texts)
-    x, y = ds[0]
+    seq_length = 10
+    TextDataset = _create_text_dataset_class()
+    ds = TextDataset(
+        data=sample_texts,
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=seq_length,
+    )
+    x, y, raw_text = ds[0]
     assert isinstance(x, Tensor) and isinstance(y, Tensor)
-    assert x.shape[0] == seq_len and y.shape[0] == seq_len
-    assert (x[1:] == y[:-1]).all() or True
+    assert x.shape[0] == seq_length and y.shape[0] == seq_length
+    assert isinstance(raw_text, str)
 
 
 def test_text_dataset_padding_truncation(tokenizer):
-    short_text = "a"
-    seq_len = 5
-    ds = TextDataset([short_text], tokenizer, seq_length=seq_len)
-    x, y = ds[0]
-    assert len(x) == seq_len
-    assert len(y) == seq_len
+    seq_length = 5
+    TextDataset = _create_text_dataset_class()
 
-    long_text = " ".join(["word"] * 10)
-    ds = TextDataset([long_text], tokenizer, seq_length=seq_len)
-    x, y = ds[0]
-    assert len(x) == seq_len
-    assert len(y) == seq_len
+    # Test padding (short text)
+    ds = TextDataset(
+        data=[{"text": "a"}],
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=seq_length,
+    )
+    x, y, _ = ds[0]
+    assert len(x) == seq_length and len(y) == seq_length
+    # Check padding
+    assert x[-1] == tokenizer.pad_token_id
+
+    # Test truncation (long text)
+    ds = TextDataset(
+        data=[{"text": "word " * 10}],
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=seq_length,
+    )
+    x, y, _ = ds[0]
+    assert len(x) == seq_length and len(y) == seq_length
+    # Check truncation preserves EOS
+    assert x[-1] == tokenizer.eos_token_id
 
 
 # --- DattabotDataLoader Tests ---
 def test_dattabot_dataloader_shapes(tokenizer, sample_texts):
-    seq_len = 10
-    ds = TextDataset(sample_texts, tokenizer, seq_length=seq_len)
-    batch_size = 2
-    loader = DattabotDataLoader(
-        dataset=ds, dataset_name="shapes_test", batch_size=batch_size
+    seq_length = 10
+    TextDataset = _create_text_dataset_class()
+    ds = TextDataset(
+        data=sample_texts,
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=seq_length,
     )
-    x, y = next(iter(loader))
-    assert x.shape[0] == batch_size and y.shape[0] == batch_size
-    assert x.shape[1] == seq_len and y.shape[1] == seq_len
+    loader = DattabotDataLoader(dataset=ds, batch_size=2)
+    x, y, raw_text = next(iter(loader))
+    assert x.shape[0] == 2 and y.shape[0] == 2
+    assert x.shape[1] == seq_length and y.shape[1] == seq_length
+    assert len(raw_text) == 2
 
 
 def test_dataloader_reset_behavior(tokenizer, sample_texts):
-    ds = TextDataset(sample_texts, tokenizer, seq_length=5)
+    seq_length = 5
+    TextDataset = _create_text_dataset_class()
+    ds = TextDataset(
+        data=sample_texts,
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=seq_length,
+    )
     loader = DattabotDataLoader(
-        dataset=ds,
-        dataset_name="reset_test",
-        batch_size=1,
-        reset_batch_when_reach_end=True,
+        dataset=ds, batch_size=1, reset_batch_when_reach_end=True
     )
     it = iter(loader)
-    # iterates twice through dataset
     results = [next(it) for _ in range(len(ds) * 2)]
     assert len(results) == len(ds) * 2
+    assert all(len(batch) == 3 for batch in results)  # Check (x, y, raw_text)
 
 
 def test_dataloader_no_reset(tokenizer, sample_texts):
-    ds = TextDataset(sample_texts, tokenizer, seq_length=5)
+    seq_length = 5
+    TextDataset = _create_text_dataset_class()
+    ds = TextDataset(
+        data=sample_texts,
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=seq_length,
+    )
     loader = DattabotDataLoader(
-        dataset=ds,
-        dataset_name="no_reset_test",
-        batch_size=1,
-        reset_batch_when_reach_end=False,
+        dataset=ds, batch_size=1, reset_batch_when_reach_end=False
     )
     it = iter(loader)
     for _ in range(len(ds)):
@@ -103,84 +142,83 @@ def test_string_to_enum_conversion():
 
 
 # --- DattabotDataBuilder Tests ---
-@patch("src.data_loader.load_dataset")
-def test_data_builder_setup(mock_load_dataset):
+@patch("datasets.load_dataset")
+def test_data_builder_setup(mock_load_dataset, tokenizer):
     train_mock = [{"text": "train sample"}]
     val_mock = [{"text": "val sample"}]
     mock_load_dataset.return_value = {"train": train_mock, "validation": val_mock}
-    agent_device = torch.device(get_agent_config().env.device)
+
     builder = DattabotDataBuilder()
     builder.download_dataset = MagicMock(return_value=(train_mock, val_mock))
+    builder.tokenizer = tokenizer
+    builder.dataset_type = DatasetType.WIKITEXT
     train_loader, val_loader, vocab = builder.setup_data()
 
-    train_batch = next(iter(train_loader))
-    x_train, y_train = train_batch
-    assert isinstance(x_train, Tensor) and isinstance(y_train, Tensor)
-    assert x_train.shape[1] == builder.seq_len
-    assert y_train.shape[1] == builder.seq_len
+    x_train, y_train, raw_text_train = next(iter(train_loader))
+    x_val, y_val, raw_text_val = next(iter(val_loader))
 
-    val_batch = next(iter(val_loader))
-    x_val, y_val = val_batch
-    assert isinstance(x_val, Tensor) and isinstance(y_val, Tensor)
-    assert x_val.shape[1] == builder.seq_len
-    assert y_val.shape[1] == builder.seq_len
+    for t in [x_train, y_train, x_val, y_val]:
+        assert isinstance(t, Tensor)
+        assert t.shape[1] == builder.seq_len
 
     assert isinstance(vocab, dict)
     assert len(vocab) > 0
 
 
-def test_build_vocab_matches_tokenizer():
+def test_build_vocab_matches_tokenizer(tokenizer):
     builder = DattabotDataBuilder()
+    builder.tokenizer = tokenizer
     vocab = builder.build_vocab()
-    tokenizer_vocab = builder.tokenizer.vocab
-    assert vocab == tokenizer_vocab
+    assert vocab == tokenizer.vocab
 
 
 # --- Edge Cases ---
 def test_text_dataset_empty(tokenizer):
-    ds = TextDataset([], tokenizer, seq_length=5)
+    TextDataset = _create_text_dataset_class()
+    ds = TextDataset(
+        data=[],
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=5,
+    )
     assert len(ds) == 0
     with pytest.raises(IndexError):
         _ = ds[0]
 
 
 def test_dataloader_empty_dataset(tokenizer):
-    ds = TextDataset([], tokenizer, seq_length=5)
+    TextDataset = _create_text_dataset_class()
+    ds = TextDataset(
+        data=[],
+        dataset_type="wikitext",
+        tokenizer=tokenizer,
+        seq_length=5,
+    )
     loader = DattabotDataLoader(
-        dataset=ds,
-        dataset_name="empty_dataset",
-        batch_size=2,
-        reset_batch_when_reach_end=True,
+        dataset=ds, batch_size=2, reset_batch_when_reach_end=True
     )
     it = iter(loader)
     with pytest.raises(StopIteration):
         next(it)
 
 
-# --- Mock HuggingFace Datasets for download_dataset ---
-@patch("src.data_loader.load_dataset")
+# --- Mock HuggingFace Datasets ---
+@patch("datasets.load_dataset")
 def test_download_dataset_ag_news(mock_load):
     train_data = [{"text": "train"}]
     test_data = [{"text": "test"}]
     mock_load.return_value = [train_data, test_data]
 
     builder = DattabotDataBuilder()
-    builder.dataset_name = DatasetType.AG_NEWS
+    builder.dataset_type = DatasetType.AG_NEWS
     train, val = builder.download_dataset()
     assert train == train_data
     assert val == test_data
 
 
-@patch("src.data_loader.load_dataset")
+@patch("datasets.load_dataset")
 def test_download_dataset_openwebtext(mock_load):
-    train_data = [
-        {"text": "t1"},
-        {"text": "t2"},
-        {"text": "t3"},
-        {"text": "t4"},
-        {"text": "t5"},
-    ]
-    # return object with train_test_split method
+    train_data = [{"text": f"t{i}"} for i in range(1, 6)]
     mock_dataset = MagicMock()
     mock_dataset.train_test_split.return_value = {
         "train": train_data[:3],
@@ -189,20 +227,20 @@ def test_download_dataset_openwebtext(mock_load):
     mock_load.return_value = mock_dataset
 
     builder = DattabotDataBuilder()
-    builder.dataset_name = DatasetType.OPENWEBTEXT
+    builder.dataset_type = DatasetType.OPENWEBTEXT
     train, val = builder.download_dataset()
     assert train == train_data[:3]
     assert val == train_data[3:]
 
 
-@patch("src.data_loader.load_dataset")
+@patch("datasets.load_dataset")
 def test_download_dataset_wikitext(mock_load):
     train_data = [{"text": "t1"}]
     val_data = [{"text": "t2"}]
     mock_load.return_value = {"train": train_data, "validation": val_data}
 
     builder = DattabotDataBuilder()
-    builder.dataset_name = DatasetType.WIKITEXT
+    builder.dataset_type = DatasetType.WIKITEXT
     train, val = builder.download_dataset()
     assert train == train_data
     assert val == val_data

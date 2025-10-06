@@ -1,11 +1,6 @@
 import logging
-
+from time import gmtime
 from src.util import Singleton
-
-try:
-    import torch.distributed as dist
-except ImportError:
-    dist = None
 
 
 class RankFilter(logging.Filter):
@@ -59,6 +54,7 @@ class DattaBotLoggerWrapper:
 
 class DattaBotLogger(object, metaclass=Singleton):
     _logger = None
+    _rank = None  # Cache rank detection
 
     def __init__(
         self,
@@ -83,23 +79,28 @@ class DattaBotLogger(object, metaclass=Singleton):
             logging_level, int
         ), f"Logging level must be an int, logging level passed in {logging_level}"
 
-        # Determine rank for filtering (default 0)
-        self.rank = 0
+        # Store this for later use
         self.log_all_ranks = log_all_ranks
-        if dist is not None and dist.is_available() and dist.is_initialized():
-            self.rank = dist.get_rank()
+
+        # Determine rank for filtering (default 0) - only called once during actual init
+        if DattaBotLogger._rank is None:
+            DattaBotLogger._rank = self._detect_rank()
+        self.rank = DattaBotLogger._rank
 
         logger = logging.getLogger("dattabot")
         if not logger.hasHandlers():
             logger.setLevel(logging_level)
-
             file_handler = logging.FileHandler(logging_file_name)
             file_handler.setLevel(logging_level)
-
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging_level)
-
-            formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            formatter = logging.Formatter(
+                "%(asctime)s UTC - %(levelname)s - %(filename)s - %(name)s.%(funcName)s - %(message)s",
+                # 12-hour format with AM/PM
+                datefmt="%I:%M:%S %p",
+            )
+            # Use UTC time
+            formatter.converter = gmtime
             file_handler.setFormatter(formatter)
             console_handler.setFormatter(formatter)
 
@@ -129,17 +130,56 @@ class DattaBotLogger(object, metaclass=Singleton):
         self._logger.setLevel(level)
         for handler in self._logger.handlers:
             handler.setLevel(level)
-        self._logger.info(
-            f"Logging level changed to: {logging.getLevelName(logging.getLevelName(level))}"
-        )
+        self._logger.info(f"Logging level changed to: {logging.getLevelName(level)}")
 
     def set_log_all_ranks(self, enabled: bool):
         self.log_all_ranks = enabled
         self._update_filters()
         self._logger.info(f"log_all_ranks set to: {enabled}")
 
+    @staticmethod
+    def _detect_rank() -> int:
+        """Lazy import PyTorch only if needed for distributed rank detection."""
+        try:
+            import torch.distributed as dist
 
-_logger_singleton: DattaBotLogger = None
+            if dist.is_available() and dist.is_initialized():
+                return dist.get_rank()
+        except ImportError:
+            pass
+        return 0
+
+
+class LazyLogger:
+    """Placeholder logger to avoid heavy imports until first actual log call."""
+
+    def __init__(self):
+        self._real_logger: DattaBotLoggerWrapper | None = None
+        self._initializing = False  # Prevent recursion
+
+    def _ensure_logger(self):
+        global _logger_singleton
+        if self._real_logger is None and not self._initializing:
+            self._initializing = True
+            try:
+                # Initialize the actual singleton if needed
+                if not isinstance(_logger_singleton, DattaBotLogger):
+                    _logger_singleton = DattaBotLogger()
+                self._real_logger = _logger_singleton._logger
+            finally:
+                self._initializing = False
+
+    def __getattr__(self, name):
+        # Avoid infinite recursion on special attributes
+        if name in ("_real_logger", "_initializing"):
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            )
+        self._ensure_logger()
+        return getattr(self._real_logger, name)
+
+
+_logger_singleton: DattaBotLogger | LazyLogger = LazyLogger()
 
 
 def get_logger(
@@ -151,13 +191,16 @@ def get_logger(
     """
     global _logger_singleton
 
-    if _logger_singleton is None:
+    # Initialize if still lazy
+    if isinstance(_logger_singleton, LazyLogger):
+        print("Initializing logger for the first time...")
         _logger_singleton = DattaBotLogger(
             logging_level=logging_level or logging.INFO,
             log_all_ranks=log_all_ranks,
         )
+        _logger_singleton._logger.info("Initialized logger!")
     else:
-        # Update log level if needed.
+        # Update log level if needed
         if logging_level is not None:
             assert isinstance(
                 logging_level, int
@@ -165,8 +208,8 @@ def get_logger(
             current_level = _logger_singleton._logger.level
             if logging_level != current_level:
                 _logger_singleton.set_log_level(logging_level)
-        # Update filter if needed.
+        # Update filter if needed
         if log_all_ranks != _logger_singleton.log_all_ranks:
             _logger_singleton.set_log_all_ranks(log_all_ranks)
 
-    return _logger_singleton.get_logger()
+    return _logger_singleton._logger

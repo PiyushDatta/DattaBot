@@ -1,7 +1,7 @@
 import time
 import traceback
 from typing import Optional
-
+from math import ceil
 import torch
 import torch.cuda.amp as amp
 import torch.distributed as dist
@@ -53,7 +53,7 @@ class Agent:
         self.agent_device = self.config.env.device
         self.setup_cpu_gpu_settings()
         # Setup multi-gpu settings.
-        if torch.cuda.device_count() > 1:
+        if dist.is_available() and torch.cuda.device_count() > 1:
             self.setup_distributed()
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
@@ -81,7 +81,7 @@ class Agent:
             device=self.agent_device,
         )
         # Wrap with distributed layer if we have multiple gpus.
-        if torch.cuda.device_count() > 1:
+        if dist.is_available() and torch.cuda.device_count() > 1:
             self.model = nn.parallel.DistributedDataParallel(
                 self.model,
                 device_ids=[self.local_rank],
@@ -496,9 +496,8 @@ class Agent:
         for _ in progress_bar:
             batch = next(dataloader)
             # input_ids: [batch, seq_len]
-            input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
-                self.agent_device
-            )
+            input_ids = batch[0].to(self.agent_device)
+            labels = batch[1].to(self.agent_device)
             batch_size = input_ids.shape[0]
             attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
             # Zero the gradients.
@@ -860,29 +859,24 @@ class Agent:
         """
         if not queries:
             return torch.empty(0, 0, dtype=torch.long), 0
-        # Encode queries using the tokenizer (batch mode).
-        tokenized_queries: list[list[int]] = self.tokenizer.encode(queries)
-        # Find max sequence length.
-        max_seq_len = self.max_response_tokens
-        # Pad each sequence to max_seq_len.
-        padded_tensors = [
-            (
-                torch.tensor(seq, dtype=torch.long)
-                if len(seq) == max_seq_len
-                else nn.functional.pad(
-                    torch.tensor(seq, dtype=torch.long),
-                    (0, max_seq_len - len(seq)),
-                    value=self.tokenizer.pad_token_id,
+        # Tokenize queries
+        tokens = [self.tokenizer.encode(query) for query in queries]
+        max_seq_len = self.config.agent.max_response_tokens
+        # Pad or truncate to max_seq_len
+        padded_tokens = []
+        for token_seq in tokens:
+            if len(token_seq) > max_seq_len:
+                token_seq = token_seq[:max_seq_len]
+            else:
+                token_seq += [self.tokenizer.pad_token_id] * (
+                    max_seq_len - len(token_seq)
                 )
-            )
-            for seq in tokenized_queries
-        ]
-        # Stack into a single tensor (num_queries, max_seq_len)
-        encoded_tensor = torch.stack(padded_tensors, dim=0)
-        # Calculate batch info
-        total_batch_size = encoded_tensor.size(0)
-        num_batches = (total_batch_size + self.batch_size - 1) // self.batch_size
-        return encoded_tensor, num_batches
+            padded_tokens.append(token_seq)
+        # Convert to tensor
+        tensor = torch.tensor(padded_tokens, dtype=torch.long)
+        # Compute number of batches
+        num_batches = ceil(len(queries) / self.batch_size)
+        return tensor, num_batches
 
     def _get_gpu_info(self) -> list[str]:
         gpu_name = "Could not retrieve gpu_name"

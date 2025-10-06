@@ -1,5 +1,6 @@
 import pytest
 import torch
+import math
 from src.agent import Agent
 from src.api_interface import DattaBotAPIResponse
 from src.util import is_device_cpu
@@ -33,9 +34,16 @@ def test_convert_queries_to_tensors(agent):
     queries = ["Hello world", "Another test query"]
     tensor, num_batches = agent.convert_queries_to_tensors(queries)
 
+    print(
+        f"Tensor shape: {tensor.shape}, Num batches: {num_batches}, Batch size: {agent.batch_size}"
+    )
     assert isinstance(tensor, torch.Tensor)
-    assert tensor.ndim == 2  # (batch, seq_len)
-    assert num_batches == 1
+    # (batch, seq_len)
+    assert tensor.ndim == 2
+    assert num_batches == math.ceil(len(queries) / agent.batch_size), (
+        f"Expected {math.ceil(len(queries) / agent.batch_size)} batches, "
+        f"got {num_batches} with batch_size={agent.batch_size}"
+    )
     assert tensor.size(0) == len(queries)
 
 

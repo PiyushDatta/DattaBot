@@ -1,7 +1,6 @@
+from __future__ import annotations
 from enum import IntEnum
 from typing import Any, Optional
-
-from torch import Tensor
 
 
 class AgentAction(IntEnum):
@@ -20,11 +19,6 @@ class DattaBotAPIException(Exception):
     """Raised when the DattaBot API has an error."""
 
     pass
-
-
-from typing import Any, Optional
-
-from torch import Tensor
 
 
 class DattaBotAPIResponse:
@@ -78,11 +72,19 @@ class DattaBotAPIResponse:
     # Metadata properties
     # -------------------------
     @property
-    def tensor_response(self) -> Optional[Tensor]:
+    def raw_text(self) -> str:
+        return self._metadata.get("raw_text", "")
+
+    @raw_text.setter
+    def raw_text(self, value: str) -> None:
+        self._metadata["raw_text"] = value
+
+    @property
+    def tensor_response(self) -> Optional["Tensor"]:
         return self._metadata.get("tensor_response", None)
 
     @tensor_response.setter
-    def tensor_response(self, value: Optional[Tensor]) -> None:
+    def tensor_response(self, value: Optional["Tensor"]) -> None:
         self._metadata["tensor_response"] = value
 
     @property
