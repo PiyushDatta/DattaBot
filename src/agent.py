@@ -1,7 +1,8 @@
 import time
 import traceback
-from typing import Optional
 from math import ceil
+from typing import Optional
+
 import torch
 import torch.cuda.amp as amp
 import torch.distributed as dist
@@ -11,7 +12,7 @@ from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
 from src.checkpointing import load_agent, save_agent
 from src.communication_mgr import DattaBotCommunicationManager
-from src.data_loader import DattabotDataBuilder, DattabotDataLoader
+from src.data_loader import DattabotDataBuilder
 
 # TODO(PiyushDatta): Get Shampoo optimizer to work.
 # from src.optim_shampoo import Shampoo
@@ -286,8 +287,6 @@ class Agent:
         train_interrupted = False
         avg_train_loss = 0
         avg_val_loss = 0
-        train_dataloader: DattabotDataLoader
-        val_dataloader: DattabotDataLoader
         vocab: dict[str, int] = {}
         try:
             self.new_training_session()
@@ -317,7 +316,7 @@ class Agent:
             self.gpu_profiler.log_gpu_memory("Training - after setup data")
             # Actual training algorithm.
             self.logger.info(
-                f"Got training and validation data for dataset {train_dataloader.dataset_name}. Now going into training loop for "
+                f"Got training and validation data for dataset {train_dataloader.dataset_type}. Now going into training loop for "
                 f"{self.config.agent.max_training_num_epochs} epochs, "
                 f"{num_train_batches_per_phase} batches per training epoch, "
                 f"and {num_val_batches_per_phase} batches per validation epoch. "
@@ -460,7 +459,7 @@ class Agent:
             num_val_batches=response.num_val_batches,
             training_score=avg_train_loss,
             validation_score=avg_val_loss,
-            dataset_name=train_dataloader.dataset_name,
+            dataset_name=train_dataloader.dataset_type.value,
             model_name=self.agent_fname_prefix,
             vocab=vocab,
             total_training_time=round(total_training_time, 2),

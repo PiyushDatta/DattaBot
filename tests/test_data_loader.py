@@ -1,10 +1,11 @@
 from unittest.mock import MagicMock, patch
+
 import pytest
 from src.data_loader import (
-    DattabotDataBuilder,
-    DattabotDataLoader,
-    string_to_enum,
+    _create_dattabot_dataloader_class,
     _create_text_dataset_class,
+    DattabotDataBuilder,
+    string_to_enum,
 )
 from src.util import DatasetType
 from torch import Tensor
@@ -88,7 +89,8 @@ def test_dattabot_dataloader_shapes(tokenizer, sample_texts):
         tokenizer=tokenizer,
         seq_length=seq_length,
     )
-    loader = DattabotDataLoader(dataset=ds, batch_size=2)
+    DattabotDataLoader = _create_dattabot_dataloader_class()
+    loader = DattabotDataLoader(dataset=ds, dataset_type="wikitext", batch_size=2)
     x, y, raw_text = next(iter(loader))
     assert x.shape[0] == 2 and y.shape[0] == 2
     assert x.shape[1] == seq_length and y.shape[1] == seq_length
@@ -104,8 +106,12 @@ def test_dataloader_reset_behavior(tokenizer, sample_texts):
         tokenizer=tokenizer,
         seq_length=seq_length,
     )
+    DattabotDataLoader = _create_dattabot_dataloader_class()
     loader = DattabotDataLoader(
-        dataset=ds, batch_size=1, reset_batch_when_reach_end=True
+        dataset=ds,
+        dataset_type="wikitext",
+        batch_size=1,
+        reset_batch_when_reach_end=True,
     )
     it = iter(loader)
     results = [next(it) for _ in range(len(ds) * 2)]
@@ -122,8 +128,12 @@ def test_dataloader_no_reset(tokenizer, sample_texts):
         tokenizer=tokenizer,
         seq_length=seq_length,
     )
+    DattabotDataLoader = _create_dattabot_dataloader_class()
     loader = DattabotDataLoader(
-        dataset=ds, batch_size=1, reset_batch_when_reach_end=False
+        dataset=ds,
+        dataset_type="wikitext",
+        batch_size=1,
+        reset_batch_when_reach_end=False,
     )
     it = iter(loader)
     for _ in range(len(ds)):
@@ -194,8 +204,12 @@ def test_dataloader_empty_dataset(tokenizer):
         tokenizer=tokenizer,
         seq_length=5,
     )
+    DattabotDataLoader = _create_dattabot_dataloader_class()
     loader = DattabotDataLoader(
-        dataset=ds, batch_size=2, reset_batch_when_reach_end=True
+        dataset=ds,
+        dataset_type="wikitext",
+        batch_size=2,
+        reset_batch_when_reach_end=True,
     )
     it = iter(loader)
     with pytest.raises(StopIteration):

@@ -1,6 +1,7 @@
 import os
 from enum import Enum
-from typing import Optional, Iterator
+from typing import Iterator, Optional
+
 from src.agent_config import get_agent_config
 from src.data_formatter import DattaBotDataFormatter
 from src.logger import get_logger
@@ -19,6 +20,7 @@ def string_to_enum(dataset_name: str) -> DatasetType:
 
 # Defer the actual class creation until torch is imported
 _TextDataset = None
+_DattabotDataLoader = None
 
 
 def _create_text_dataset_class():
@@ -27,8 +29,8 @@ def _create_text_dataset_class():
     if _TextDataset is not None:
         return _TextDataset
 
-    from torch.utils.data import Dataset
     import torch
+    from torch.utils.data import Dataset
 
     class TextDataset(Dataset):
         """Custom dataset for GPT-style training"""
@@ -95,39 +97,48 @@ def _create_text_dataset_class():
     return _TextDataset
 
 
-class DattabotDataLoader:
-    def __init__(
-        self,
-        dataset,
-        batch_size: int = 32,
-        reset_batch_when_reach_end: bool = True,
-        **kwargs,
-    ):
-        from torch.utils.data import DataLoader as TorchDataLoader
+def _create_dattabot_dataloader_class():
+    global _DattabotDataLoader
+    if _DattabotDataLoader is not None:
+        return _DattabotDataLoader
+    from torch.utils.data import DataLoader as TorchDataLoader
 
-        self._reset_batch_end = reset_batch_when_reach_end
-        self._dataset = dataset
-        self._iterator: Optional[Iterator] = None
-        self._dataloader = TorchDataLoader(dataset, batch_size=batch_size, **kwargs)
+    class DattabotDataLoader(TorchDataLoader):
+        def __init__(
+            self,
+            dataset,
+            dataset_type,
+            batch_size: int = 32,
+            reset_batch_when_reach_end: bool = True,
+            **kwargs,
+        ):
+            self._reset_batch_end = reset_batch_when_reach_end
+            self._dataset = dataset
+            self.dataset_type = dataset_type
+            self._iterator: Optional[Iterator] = None
+            super().__init__(dataset, batch_size=batch_size, **kwargs)
 
-    def __iter__(self) -> Iterator:
-        self._iterator = iter(self._dataloader)
-        return self
+        def __iter__(self) -> Iterator:
+            self._iterator = super().__iter__()
+            return self
 
-    def __next__(self):
-        if self._iterator is None:
-            self._iterator = iter(self._dataloader)
-        try:
-            return next(self._iterator)
-        except StopIteration:
-            if self._reset_batch_end:
-                self._iterator = iter(self._dataloader)
+        def __next__(self):
+            if self._iterator is None:
+                self._iterator = super().__iter__()
+            try:
                 return next(self._iterator)
-            else:
-                raise
+            except StopIteration:
+                if self._reset_batch_end:
+                    self._iterator = super().__iter__()
+                    return next(self._iterator)
+                else:
+                    raise
 
-    def __len__(self):
-        return len(self._dataloader)
+        def __len__(self):
+            return super().__len__()
+
+    _DattabotDataLoader = DattabotDataLoader
+    return _DattabotDataLoader
 
 
 class DattabotDataBuilder:
@@ -214,9 +225,10 @@ class DattabotDataBuilder:
         generator: torch.Generator = torch.Generator().manual_seed(42)
         train_sampler = self.get_distributed_sampler(train_dataset, shuffle=True)
         val_sampler = self.get_distributed_sampler(val_dataset, shuffle=False)
-
+        DattabotDataLoader = _create_dattabot_dataloader_class()
         train_loader = DattabotDataLoader(
             dataset=train_dataset,
+            dataset_type=self.dataset_type,
             batch_size=self.batch_size,
             sampler=train_sampler,
             # Only shuffle if not distributed
@@ -225,6 +237,7 @@ class DattabotDataBuilder:
         )
         val_loader = DattabotDataLoader(
             dataset=val_dataset,
+            dataset_type=self.dataset_type,
             batch_size=self.batch_size,
             sampler=val_sampler,
             shuffle=False,

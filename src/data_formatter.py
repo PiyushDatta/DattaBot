@@ -1,4 +1,5 @@
-from typing import Any, Dict, Union, Optional
+from typing import Any, Dict, Optional, Union
+
 from src.tokenizer import get_tokenizer
 from src.util import DatasetType
 
