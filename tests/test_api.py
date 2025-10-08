@@ -64,7 +64,8 @@ def test_tensor_encoding_two_queries():
         )
 
 
-def test_single_response_text():
+@pytest.mark.integration
+def test_real_single_response_text():
     query = "How are you?"
     resp: DattaBotAPIResponse = datta_bot_api.get_response(query)
     assert isinstance(resp, DattaBotAPIResponse)

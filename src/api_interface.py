@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from enum import IntEnum
 from typing import Any, Optional
 
@@ -71,6 +72,11 @@ class DattaBotAPIResponse:
     # -------------------------
     # Metadata properties
     # -------------------------
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Get metadata dictionary."""
+        return self._metadata
+
     @property
     def raw_text(self) -> str:
         return self._metadata.get("raw_text", "")

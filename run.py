@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 import sys
+
 from api_runner import APIActions
 
 
@@ -103,12 +104,40 @@ def run_client():
     subprocess.run(cmd)
 
 
-def run_tests(test_name: str = "all"):
-    test_target = "tests"
-    if test_name not in (None, "", "all"):
-        test_target = os.path.join("tests", test_name)
+def run_tests(test_mode: str = "unit", test_file: str = None):
+    """
+    Run tests with different modes.
 
+    Args:
+        test_mode: "unit" (fast, mocked), "integration" (slow, real), or "all"
+        test_file: Optional specific test file to run
+    """
+    # Determine test target
+    if test_file and test_file not in ("unit", "integration", "all"):
+        # User specified a specific test file
+        test_target = os.path.join("tests", test_file)
+    else:
+        test_target = "tests"
+
+    # Build pytest command based on mode
     command = [sys.executable, "-m", "pytest", test_target, "-v"]
+
+    if test_mode == "unit":
+        # Run only fast unit tests (skip integration)
+        print("Running UNIT tests (fast, with mocks)...")
+        command.extend(["-m", "not integration"])
+    elif test_mode == "integration":
+        # Run only integration tests
+        print("Running INTEGRATION tests (slow, real model)...")
+        command.extend(["-m", "integration"])
+    elif test_mode == "all":
+        # Run all tests
+        print("Running ALL tests (unit + integration)...")
+        command.extend(["-m", ""])
+    else:
+        raise ValueError(
+            f"Unknown test mode: {test_mode}. Use 'unit', 'integration', or 'all'"
+        )
 
     env = os.environ.copy()
     env.update(
@@ -123,27 +152,59 @@ def run_tests(test_name: str = "all"):
 
     print(f"Running command: {' '.join(command)}")
     try:
-        subprocess.run(command, check=True, env=env)
+        result = subprocess.run(command, check=True, env=env)
+        print(f"\nTests passed!")
     except subprocess.CalledProcessError as e:
-        print(f"Tests failed with exit code {e.returncode}")
+        print(f"\nTests failed with exit code {e.returncode}")
         sys.exit(e.returncode)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DattaBot start and run script!")
+    parser = argparse.ArgumentParser(
+        description="DattaBot start and run script!",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run fast unit tests (default)
+  python run.py --test
+  python run.py --test unit
+
+  # Run slow integration tests
+  python run.py --test integration
+
+  # Run all tests
+  python run.py --test all
+
+  # Run specific test file (unit tests only)
+  python run.py --test test_model.py
+
+  # Run specific test file with integration tests
+  python run.py --test integration --test-file test_agent.py
+        """,
+    )
+
     group = parser.add_mutually_exclusive_group()
 
     group.add_argument(
         "--test",
         nargs="?",
-        const="all",
-        help="Run tests (optionally specify test file, e.g. --test test_model.py)",
+        const="unit",
+        choices=["unit", "integration", "all"],
+        help="Run tests: 'unit' (fast, default), 'integration' (slow), or 'all'",
     )
+
+    parser.add_argument(
+        "--test-file",
+        type=str,
+        help="Specific test file to run (e.g., test_model.py)",
+    )
+
     group.add_argument(
         "--api_cmd",
         type=str,
         help=f"Run API command. Commands: {[action.value for action in APIActions]}",
     )
+
     parser.add_argument(
         "--api_args",
         type=str,
@@ -152,8 +213,9 @@ def main():
     )
 
     args = parser.parse_args()
+
     if args.test is not None:
-        run_tests(test_name=args.test)
+        run_tests(test_mode=args.test, test_file=args.test_file)
     elif args.api_cmd:
         process_api_cmd(api_cmd=args.api_cmd, api_args=args.api_args)
     else:

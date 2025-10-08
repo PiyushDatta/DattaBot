@@ -6,7 +6,7 @@ from src.api_interface import DattaBotAPIResponse
 from src.logger import get_logger
 
 # Defines the delimiter to split the API args.
-DELIMITER = ","
+DELIMITER = "<|endoftext|>"
 
 
 class APIActions(Enum):
@@ -34,7 +34,13 @@ def process_api_cmd(api_cmd: str, api_args: list[str]):
             queries = api_args.split(DELIMITER)
             # Strip whitespace from each query.
             queries = [query.strip() for query in queries]
-            print(api_client.respond_to_queries(queries=queries))
+            responses: list[DattaBotAPIResponse] = api_client.respond_to_queries(
+                queries=queries
+            )
+            # Only print on rank 0 (responses will be empty on other ranks)
+            if responses:
+                for i, response in enumerate(responses, start=1):
+                    print(f"\nResponse {i}:\n{response.text}\n")
         case APIActions.GET_ENCODING.name:
             print(api_client.get_encoding(queries=api_args))
         case APIActions.GET_DECODING.name:

@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import timedelta
 from enum import Enum
+
 from omegaconf import DictConfig
 
 
@@ -24,6 +25,12 @@ class Singleton(type):
         if cls not in cls._instances:
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
+
+
+def is_rank_0():
+    import torch.distributed as dist
+
+    return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
 
 
 def get_tensor_dtype_from_config(config: DictConfig):

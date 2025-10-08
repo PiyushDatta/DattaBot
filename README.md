@@ -24,13 +24,19 @@ For information on python virtual environment: [notes.md](notes.md)
 
 For manual: Use `--help`, like so: `python run.py --help`
 
-# How to run unit tests
+# How to run fast mock unit tests only
 
 `python run.py --test`
 
 # How to run a specific unit test
 
-`python run.py --test test_smoke_test.py`
+`python run.py --test --test-file test_model.py`
+
+# How to run only slow integration tests (real model, ~5 minutes)
+`python run.py --test integration`
+
+# Hwo to run all tests (unit + integration)
+`python run.py --test all`
 
 # How to test api
 
@@ -42,6 +48,10 @@ Examples:
 -   `python run.py --api_cmd "respond_to_queries" --api_args "hello there"`
 -   `python run.py --api_cmd "get_random_validation_example"`
 
+Example of long query:
+```
+python run.py --api_cmd "respond_to_queries" --api_args "Question: what is the increase observed in the liabilities incurred during 2017 and 2018? Answer: ? Context: Table: | 2018 | 2017 carrying amount at beginning of period | $ 946848 | $ 912926 liabilities incurred | 79057 | 54764 liabilities settled ( 1 ) | -70829 ( 70829 ) | -61871 ( 61871 ) accretion | 36622 | 34708 revisions | -38932 ( 38932 ) | -9818 ( 9818 ) foreign currency translations | 1611 | 16139 carrying amount at end of period | $ 954377 | $ 946848 current portion | $ 26214 | $ 19259 noncurrent portion | $ 928163 | $ 927589 eog utilized average prices per acre from comparable market transactions and estimated discounted cash flows as the basis for determining the fair value of unproved and proved properties , respectively , received in non-cash property exchanges . see note 10 . fair value of debt . at december 31 , 2018 and 2017 , respectively , eog had outstanding $ 6040 million and $ 6390 million aggregate principal amount of senior notes , which had estimated fair values of approximately $ 6027 million and $ 6602 million , respectively . the estimated fair value of debt was based upon quoted market prices and , where such prices were not available , other observable ( level 2 ) inputs regarding interest rates available to eog at year-end . 14 . accounting for certain long-lived assets eog reviews its proved oil and gas properties for impairment purposes by comparing the expected undiscounted future cash flows at a depreciation , depletion and amortization group level to the unamortized capitalized cost of the asset . the carrying values for assets determined to be impaired were adjusted to estimated fair value using the income approach described in the fair value measurement topic of the asc . in certain instances , eog utilizes accepted offers from third-party purchasers as the basis for determining fair value . during 2018 , proved oil and gas properties with a carrying amount of $ 139 million were written down to their fair value of $ 18 million , resulting in pretax impairment charges of $ 121 million . during 2017 , proved oil and gas properties with a carrying amount of $ 370 million were written down to their fair value of $ 146 million , resulting in pretax impairment charges of $ 224 million . impairments in 2018 , 2017 and 2016"
+```
 
 # How to train agent/model
 

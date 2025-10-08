@@ -14,8 +14,6 @@ from src.checkpointing import load_agent, save_agent
 from src.communication_mgr import DattaBotCommunicationManager
 from src.data_loader import DattabotDataBuilder
 
-# TODO(PiyushDatta): Get Shampoo optimizer to work.
-# from src.optim_shampoo import Shampoo
 from src.gpu_profiler import BackgroundGPUProfiler
 from src.logger import get_logger
 from src.metric_tracker import get_metric_tracker, MetricTracker
@@ -25,6 +23,7 @@ from src.util import (
     get_logging_level_from_config,
     get_tensor_dtype_from_config,
     is_device_cpu,
+    is_rank_0,
     setup_torch_dist_init,
 )
 
@@ -52,43 +51,28 @@ class Agent:
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         # Setup hardware settings.
         self.agent_device = self.config.env.device
-        self.setup_cpu_gpu_settings()
+        self._setup_cpu_gpu_settings()
         # Setup multi-gpu settings.
         if dist.is_available() and torch.cuda.device_count() > 1:
-            self.setup_distributed()
+            self._setup_distributed()
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
         self.comm_manager = DattaBotCommunicationManager()
         tokenizer_model_name = repr(self.tokenizer)
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
+        self.d_model = self.config.neural_net.model_dimensions
         # Setup data loader.
         self.data_builder = DattabotDataBuilder()
-        # Setup model. We pass in tensor_dtype to the model, but remember we
-        # may use AMP below which will have all tensors as float16/bfloat16.
-        self.model = DattaBotModel(device=self.agent_device, dtype=self.tensor_dtype)
-        self.model.to(device=self.agent_device, dtype=self.tensor_dtype)
-        self.logger.info(f"Model is on: {self.agent_device}")
-        self.d_model = self.config.neural_net.model_dimensions
-        self.logger.info(f"Model dimensions: {self.d_model}")
-        self.logger.info(
-            f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
-        )
-        # Load model weights
-        self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
-        load_agent(
-            model=self.model,
-            filepath=self.weights_fname,
-            logger=self.logger,
-            device=self.agent_device,
-        )
-        # Wrap with distributed layer if we have multiple gpus.
-        if dist.is_available() and torch.cuda.device_count() > 1:
-            self.model = nn.parallel.DistributedDataParallel(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-            )
-        self.model.cuda()
+        # Initialize AMP scaler.
+        self.scaler = amp.GradScaler()
+        # Initialize AdaptiveLogSoftmaxWithLoss.
+        self.loss_fn = nn.AdaptiveLogSoftmaxWithLoss(
+            in_features=self.d_model,
+            n_classes=self.tokenizer.vocab_size,
+            cutoffs=[10_000, 50_000, self.tokenizer.vocab_size - 1],
+            div_value=4.0,
+            head_bias=False,
+        ).to(self.agent_device)
         # Setup training objects.
         self.train_batch_idx = 0
         self.val_batch_idx = 0
@@ -97,6 +81,18 @@ class Agent:
         self.logger.debug(f"Batch size: {self.batch_size}")
         self.logger.debug(f"Max tokens: {self.max_response_tokens}")
         self.lr = self.config.agent.lr
+        # Setup model.
+        # We pass in tensor_dtype to the model, but remember we may use
+        # AMP autocast during model inference/training which will have
+        # all tensors as float16/bfloat16.
+        self.model = DattaBotModel(device=self.agent_device, dtype=self.tensor_dtype)
+        self.model.to(device=self.agent_device, dtype=self.tensor_dtype)
+        self.logger.info(f"Model is on: {self.agent_device}")
+        self.logger.info(f"Model dimensions: {self.d_model}")
+        self.logger.info(
+            f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
+        )
+        # TODO(PiyushDatta): Try and get Shampoo optimizer to work.
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
@@ -111,29 +107,48 @@ class Agent:
             pct_start=0.3,
             anneal_strategy="cos",
         )
-        # TODO(PiyushDatta): Get Shampoo optimizer to work.
-        # self.optimizer = Shampoo(
-        #     params=self.model.parameters(),
-        #     lr=self.lr,
-        #     momentum=0.9,
-        #     weight_decay=0.01,
-        #     # beta2=0.99,
-        #     # block_size=128,
-        #     update_freq=1,
-        #     epsilon=1e-12
-        # )
-        # Initialize AMP scaler
-        self.scaler = amp.GradScaler()
-        # Initialize AdaptiveLogSoftmaxWithLoss.
-        self.loss_fn = nn.AdaptiveLogSoftmaxWithLoss(
-            in_features=self.d_model,
-            n_classes=self.tokenizer.vocab_size,
-            cutoffs=[10_000, 50_000, self.tokenizer.vocab_size - 1],
-            div_value=4.0,
-            head_bias=False,
-        ).to(self.agent_device)
+        # Load model weights
+        self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
+        load_agent(
+            model=self.model,
+            filepath=self.weights_fname,
+            device=self.agent_device,
+            loss_fn=self.loss_fn,
+            optimizer=self.optimizer,
+        )
+        # Wrap with distributed layer if we have multiple gpus.
+        if dist.is_available() and torch.cuda.device_count() > 1:
+            self.model = nn.parallel.DistributedDataParallel(
+                self.model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+            )
+        self.model.cuda()
+        # Setup inference engine when needed.
+        self.inference_engine = None
 
-    def setup_distributed(self):
+    def _save_agent(self):
+        """Helper method to save agent."""
+        save_agent(
+            model=self.model,
+            filename=self.weights_fname,
+            loss_fn=self.loss_fn,
+            optimizer=self.optimizer,
+        )
+
+    def _setup_inference_engine(self):
+        """Setup high-performance inference engine."""
+        from src.inference_engine import DattaBotInferenceEngine
+
+        if self.inference_engine is None:
+            self.inference_engine = DattaBotInferenceEngine(
+                model=self.model,
+                device=self.agent_device,
+                adaptive_softmax=self.loss_fn,
+            )
+            self.logger.info("Inference engine initialized and ready for deployment!")
+
+    def _setup_distributed(self):
         assert (
             dist.is_initialized() == True
         ), "Distributed process group is not initialized. Please call dist.is_initialized() first."
@@ -145,7 +160,7 @@ class Agent:
         torch.cuda.set_device(self.local_rank)
         self.agent_device = f"cuda:{self.local_rank}"
 
-    def setup_cpu_gpu_settings(self):
+    def _setup_cpu_gpu_settings(self):
         # torch.manual seed(3407) is all you need
         # https://arxiv.org/pdf/2109.08203
         seed = 3407
@@ -157,19 +172,6 @@ class Agent:
         torch.backends.cudnn.allow_tf32 = True
         self.agent_device = self.config.env.device
         torch.cuda.empty_cache()
-
-    @property
-    def tokenizer_obj(self):
-        """
-        Accessor for the tokenizer object.
-        Example usage: agent.tokenizer_obj.encode(["Hello"])
-        """
-        return self.tokenizer
-
-    def _is_rank_0(self):
-        return (
-            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
-        )
 
     def _compute_loss(
         self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None
@@ -229,6 +231,14 @@ class Agent:
             f"Got {attention_pad_mask.shape}, expected {expected_shape}"
         )
         return attention_pad_mask
+
+    @property
+    def tokenizer_obj(self):
+        """
+        Accessor for the tokenizer object.
+        Example usage: agent.tokenizer_obj.encode(["Hello"])
+        """
+        return self.tokenizer
 
     def new_training_session(self):
         self.logger.info("Agent's training session has begun...")
@@ -325,7 +335,7 @@ class Agent:
             )
             for epoch in range(self.config.agent.max_training_num_epochs):
                 curr_epoch_num = epoch + 1
-                if self._is_rank_0():
+                if is_rank_0():
                     self.logger.debug(
                         f"\nEpoch {curr_epoch_num}/{self.config.agent.max_training_num_epochs}"
                     )
@@ -350,7 +360,7 @@ class Agent:
                 response.num_train_tokens_processed += train_tokens_in_epoch
                 response.num_train_batches += train_steps_this_epoch
                 elapsed = time.time() - train_start_time
-                if self._is_rank_0():
+                if is_rank_0():
                     self.logger.debug(
                         f"[Epoch {curr_epoch_num}] avg_train_loss={avg_train_loss:.4f}, "
                         f"tokens_processed={tokens_processed:,}"
@@ -377,7 +387,7 @@ class Agent:
                 tokens_processed += val_tokens_in_epoch
                 response.num_val_tokens_processed += val_tokens_in_epoch
                 response.num_val_batches += val_steps_this_epoch
-                if self._is_rank_0():
+                if is_rank_0():
                     self.logger.debug(
                         f"[Epoch {curr_epoch_num}] avg_val_loss={avg_val_loss:.4f}"
                     )
@@ -393,22 +403,14 @@ class Agent:
                 # Save best model.
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
-                    if self._is_rank_0():
-                        save_agent(
-                            model=self.model,
-                            filepath=self.weights_fname,
-                            logger=self.logger,
-                        )
+                    if is_rank_0():
+                        self._save_agent()
                         self.logger.info("New best model saved!")
                     self.logger.info(f"Best validation loss: {avg_val_loss:.2f}\n")
                 # Periodic checkpoint.
-                if self._is_rank_0() and total_steps % ckpt_interval == 0:
-                    if self._is_rank_0():
-                        save_agent(
-                            model=self.model,
-                            filepath=self.weights_fname,
-                            logger=self.logger,
-                        )
+                if is_rank_0() and total_steps % ckpt_interval == 0:
+                    if is_rank_0():
+                        self._save_agent()
                         self.logger.info(
                             f"New model saved since total_steps ({total_steps}) has hit ckpt_interval ({ckpt_interval})."
                         )
@@ -440,12 +442,8 @@ class Agent:
             self.end_training_session()
         finally:
             # Always save the final model.
-            if self._is_rank_0():
-                save_agent(
-                    model=self.model,
-                    filepath=self.weights_fname,
-                    logger=self.logger,
-                )
+            if is_rank_0():
+                self._save_agent()
         # Log the training details, including the time taken to train.
         train_end_time = time.time()
         total_training_time = train_end_time - train_start_time
@@ -562,7 +560,7 @@ class Agent:
                 }
             )
             # Log metrics using MetricTracker
-            if self._is_rank_0():
+            if is_rank_0():
                 self.metric_tracker.log_metrics(
                     {
                         "train/batch_loss": loss.item(),
@@ -662,7 +660,7 @@ class Agent:
                         "val_perplexity": perplexity,
                     }
                 )
-                if self._is_rank_0():
+                if is_rank_0():
                     # Log validation batch metrics.
                     self.metric_tracker.log_metrics(
                         {
@@ -681,7 +679,7 @@ class Agent:
             total_loss, total_steps, total_tokens = loss_tensor.tolist()
             avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
         # Log epoch summary if rank 0.
-        if self._is_rank_0():
+        if is_rank_0():
             self.logger.info(
                 f"[Validation | Epoch {epoch_num}] avg_loss={avg_loss:.4f}, "
                 f"perplexity={torch.exp(torch.tensor(avg_loss)).item():.2f}"
@@ -696,111 +694,33 @@ class Agent:
 
         return avg_loss, total_steps, total_tokens
 
-    def _inference(self, queries: list[str]) -> list[DattaBotAPIResponse]:
-        """
-        Generate responses for a list of queries using the trained model.
-        Args:
-            queries: A list of input queries to process.
-        Returns:
-            A list of DattaBotAPIResponse objects (one per query).
-        """
-        responses: list[DattaBotAPIResponse] = []
-        try:
-            if self.local_rank != 0:
-                self.logger.debug(
-                    "Skipping inference since this is not the main process."
-                )
-                return [
-                    DattaBotAPIResponse(
-                        response_dict={
-                            "output_text": f"Skip, not rank 0, this is rank {self.local_rank}."
-                        }
-                    )
-                ]
-            if not queries:
-                self.logger.warning("No queries provided for inference.")
-                return [
-                    DattaBotAPIResponse(
-                        response_dict={"output_text": "No queries to process."}
-                    )
-                ]
-            self.model.eval()
-            self.logger.info(f"Processing {len(queries)} queries for inference.")
-            # Record all user queries in history
-            for q in queries:
-                self.comm_manager.add_user_message(q)
-            # Convert queries to padded tensors
-            batch_tensor, _ = self.convert_queries_to_tensors(queries)
-            batch_tensor = batch_tensor.to(device=self.agent_device, dtype=torch.long)
-            batch_size, _ = batch_tensor.shape
-
-            assert batch_size == len(
-                queries
-            ), f"Batch size mismatch: {batch_size} != {len(queries)}"
-
-            with torch.no_grad():
-                with amp.autocast(
-                    enabled=(not is_device_cpu(self.agent_device)),
-                    dtype=torch.bfloat16,
-                ):
-                    # Forward pass.
-                    logits: Tensor = self.model(batch_tensor)
-                    assert logits.shape == (
-                        batch_size,
-                        self.max_response_tokens,
-                        self.d_model,
-                    ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
-                # Greedy decoding → (batch_size, seq_len)
-                predicted_ids: Tensor = torch.argmax(logits, dim=-1)
-                # Decode tokens back into text
-                decoded_responses: list[str] = self.tokenizer.decode(
-                    tokens_or_tokens_list=predicted_ids.tolist()
-                )
-
-            # Build one DattaBotAPIResponse per query
-            for i, _ in enumerate(queries):
-                reply_text = decoded_responses[i]
-                self.comm_manager.add_agent_message(reply_text)
-                responses.append(
-                    DattaBotAPIResponse(
-                        response_dict={"output_text": reply_text},
-                        metadata={
-                            "tensor_response": predicted_ids[i].clone().detach(),
-                            "tokenizer_encodings": batch_tensor[i].tolist(),
-                            "tokenizer_decodings": reply_text,
-                        },
-                    )
-                )
-
-        except Exception as e:
-            tb_str = traceback.format_exc()
-            self.logger.error(f"An error occurred during inference: {e}")
-            self.logger.error(f"Traceback:\n{tb_str}")
-            error_msg = (
-                "An error occurred while processing your request. Please try again."
-            )
-            self.comm_manager.add_agent_message(error_msg)
-            return [DattaBotAPIResponse(response_dict={"output_text": error_msg})]
-
-        return responses
-
     def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
-        self.logger.info(f"Processing queries: {queries}")
-        # Call the inference method
-        responses: list[DattaBotAPIResponse] = self._inference(queries=queries)
+        if is_rank_0():
+            self.logger.info(f"Processing queries: {queries}")
+            self.logger.info(f"Queries length: {len(queries)}")
+        # Call the inference engine.
+        if self.inference_engine is None:
+            self._setup_inference_engine()
+        assert self.inference_engine is not None, "Inference engine is not set up."
+        # Use inference engine for batch generation.
+        responses: list[DattaBotAPIResponse] = self.inference_engine.batch_generate(
+            queries=queries
+        )
+        # Validate responses.
         assert isinstance(responses, list), f"Expected list, got {type(responses)}"
         assert all(
             isinstance(r, DattaBotAPIResponse) for r in responses
         ), "All responses must be DattaBotAPIResponse"
-        # Log the results
-        self.logger.debug(f"Query Response for first response: {responses[0].text}")
-        self.logger.debug(
-            f"Number of Batches for first response: {responses[0].num_train_batches}"
-        )
-        self.logger.debug(
-            f"Tensor Response for the first response: {responses[0].tensor_response}"
-        )
-        self.logger.debug(f"Number of responses: {len(responses)}")
+        # Log the results. Only on rank 0.
+        if is_rank_0():
+            self.logger.debug(f"Query Response for first response: {responses[0].text}")
+            self.logger.debug(
+                f"Number of Batches for first response: {responses[0].num_train_batches}"
+            )
+            self.logger.debug(
+                f"Tensor Response for the first response: {responses[0].tensor_response}"
+            )
+            self.logger.debug(f"Number of responses: {len(responses)}")
         return responses
 
     def _log_training_details(
