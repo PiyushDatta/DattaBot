@@ -13,7 +13,9 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
     - Linux/Mac/Other: `source dattabot_venv/bin/activate`
 3. Pip install all dependencies
     - `python -m pip install -r requirements.txt`
-4. Git LFS install and pull the weights (DATTABOT_VERSION_x_x_weights.pt)
+4. Download the weights
+    - `git clone https://huggingface.co/datapi/dattabot-weights`
+5. Git LFS install and pull the weights (DATTABOT_VERSION_x_x_weights.pt)
     - `git lfs install && git lfs pull`
 
 # How to interact with bot (run either of them) via client
@@ -33,9 +35,11 @@ For manual: Use `--help`, like so: `python run.py --help`
 `python run.py --test --test-file test_model.py`
 
 # How to run only slow integration tests (real model, ~5 minutes)
+
 `python run.py --test integration`
 
 # Hwo to run all tests (unit + integration)
+
 `python run.py --test all`
 
 # How to test api
@@ -49,6 +53,7 @@ Examples:
 -   `python run.py --api_cmd "get_random_validation_example"`
 
 Example of long query:
+
 ```
 python run.py --api_cmd "respond_to_queries" --api_args "
 Question: what portion of the total lease payments is due in the next 12 months?
@@ -69,6 +74,7 @@ present value of net minimum lease payments | $ 295304
 entergy corporation and subsidiaries notes to financial statements as of december 31 , 2008 , system energy had future minimum lease payments ( reflecting an implicit rate of 5.13% ( 5.13 % ) ) , which are recorded as long-term debt as follows : amount ( in thousands ) .
 "
 ```
+
 Answer: 13.6%
 
 # How to train agent/model
