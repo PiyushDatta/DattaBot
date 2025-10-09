@@ -5,7 +5,7 @@ from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import get_tokenizer
 from src.util import get_logging_level_from_config
-from torch import arange, backends, cat, dtype, nn, ones, rsqrt, Tensor
+from torch import arange, backends, cat, dtype, nn, ones, outer, rsqrt, Tensor
 
 
 # Transformer Model.
@@ -29,7 +29,6 @@ class DattaBotModel(nn.Module):
         self.max_tokens = self.config.agent.max_response_tokens
         self.logger.debug(f"Max tokens: {self.max_tokens}")
         self.token_embedding = nn.Embedding(self.vocab_size, self.d_model)
-        self.pos_embedding = nn.Embedding(self.max_tokens, self.d_model)
         self.emb_dropout = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
         self.decoder_stack = TransformerDecoderStack(
             n_layers=self.n_layers,
@@ -51,13 +50,12 @@ class DattaBotModel(nn.Module):
         pos_ids = (
             arange(seq_len, device=self.device).unsqueeze(0).expand(batch_size, -1)
         )
-        # Embeddings + positional encoding + dropout
+        # Embeddings + RoPe relative positional encoding + dropout
         # gpt-style embedding scaling
         output = self.token_embedding(input_ids) * sqrt(self.d_model)
-        output = output + self.pos_embedding(pos_ids)
         output = self.emb_dropout(output)
         # apply causal mask inside
-        output = self.decoder_stack(output, attention_pad_mask)
+        output = self.decoder_stack(output, attention_pad_mask, pos_ids)
         # final norm
         logits = self.final_norm(output)
         # [batch, seq_len] -> [batch, seq_len, d_model]
@@ -80,7 +78,10 @@ class TransformerDecoderStack(nn.Module):
         )
 
     def forward(
-        self, input_ids: Tensor, attention_mask: Optional[Tensor] = None
+        self,
+        input_ids: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        position_ids: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Args:
@@ -92,7 +93,11 @@ class TransformerDecoderStack(nn.Module):
         """
         output = input_ids
         for layer in self.layers:
-            output = layer(tgt_input=output, attention_mask=attention_mask)
+            output = layer(
+                tgt_input=output,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
         return output
 
 
@@ -115,7 +120,10 @@ class TransformerDecoderBlock(nn.Module):
         self.position_wise_ffn_norm = RMSNorm(dim=embedded_dim_size)
 
     def forward(
-        self, tgt_input: Tensor, attention_mask: Optional[Tensor] = None
+        self,
+        tgt_input: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        position_ids: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Args:
@@ -128,6 +136,7 @@ class TransformerDecoderBlock(nn.Module):
             input_key=tgt_input,
             input_value=tgt_input,
             mask=attention_mask,
+            position_ids=position_ids,
         )
         output = self.multi_head_attn_dropout(output)
         output = tgt_input + output
@@ -176,11 +185,22 @@ class TransformerMultiHeadAttention(nn.Module):
         self.concat_layer = nn.Linear(embedded_dim_size, embedded_dim_size)
 
     def forward(
-        self, input_query: Tensor, input_key: Tensor, input_value: Tensor, mask: Tensor
+        self,
+        input_query: Tensor,
+        input_key: Tensor,
+        input_value: Tensor,
+        mask: Tensor,
+        position_ids: Optional[Tensor] = None,
     ) -> Tensor:
         attention_score = cat(
             [
-                layer(query=input_query, key=input_key, value=input_value, mask=mask)
+                layer(
+                    query=input_query,
+                    key=input_key,
+                    value=input_value,
+                    mask=mask,
+                    position_ids=position_ids,
+                )
                 for layer in self.attention_layers
             ],
             dim=-1,
@@ -206,6 +226,13 @@ class TransformerScaledDotProductAttention(nn.Module):
         self.value_layer = nn.Linear(
             in_features=embedded_dim_size, out_features=output_size
         )
+        # RoPE for relative positional encoding
+        self.rope = RotaryPositionalEmbedding(
+            dim=output_size,
+            # Allow twice the extrapolation
+            max_seq_len=self.config.agent.max_response_tokens * 2,
+            device=self.config.env.device,
+        )
         self.dropout = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
 
     def forward(
@@ -215,6 +242,7 @@ class TransformerScaledDotProductAttention(nn.Module):
         value: Tensor,
         # TODO(PiyushDatta): Figure out what to do with the mask, we are padding the sequences.
         mask: Optional[Tensor] = None,
+        position_ids: Optional[Tensor] = None,
     ) -> Tensor:
         # [batch_size, seq_len, d_model]
         _, tgt_len, _ = query.size()
@@ -233,6 +261,8 @@ class TransformerScaledDotProductAttention(nn.Module):
         query = query.unsqueeze(1)
         key = key.unsqueeze(1)
         value = value.unsqueeze(1)
+        # Apply RoPE to Q and K (but not to V)
+        query, key = self.rope(query, key, position_ids)
         # Use SDPA (dispatches to FlashAttention if available)
         with backends.cuda.sdp_kernel(
             enable_flash=backends.cuda.flash_sdp_enabled(),
@@ -278,3 +308,71 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    """
+    Rotary Position Embedding (RoPE).
+    https://arxiv.org/abs/2104.09864
+
+    Allows model to understand relative positioning instead of absolute positioning.
+    Also enables better long range dependencies.
+    Allows model to evaluate on longer sequences.
+    Slightly better model performance, training speed and memory efficiency,
+    than absolute embedding positioning.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        max_seq_len: int = 8192,
+        base: float = 10000.0,
+        device: str = "cpu",
+    ):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        self.base = base
+        # Compute inverse frequencies.
+        inv_freq = 1.0 / (base ** (arange(0, dim, 2, device=device).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        # Precompute cos/sin cache.
+        self._build_cache(max_seq_len, device)
+
+    def _build_cache(self, max_seq_len: int, device: str):
+        """Precompute rotation matrices for all positions."""
+        t = arange(max_seq_len, device=device).type_as(self.inv_freq)
+        freqs = outer(t, self.inv_freq)
+        emb = cat([freqs, freqs], dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+
+    def rotate_half(self, x: Tensor) -> Tensor:
+        """Rotate half the hidden dims."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return cat([-x2, x1], dim=-1)
+
+    def apply_rotary_pos_emb(self, x: Tensor, position_ids: Tensor) -> Tensor:
+        """Apply rotary embeddings to input tensor."""
+        cos = self.cos_cached[position_ids].to(x.device)
+        sin = self.sin_cached[position_ids].to(x.device)
+        if x.dim() == 4 and x.shape[1] != position_ids.shape[1]:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
+        return (x * cos) + (self.rotate_half(x) * sin)
+
+    def forward(
+        self, q: Tensor, k: Tensor, position_ids: Tensor = None
+    ) -> tuple[Tensor, Tensor]:
+        """Apply RoPE to query and key."""
+        batch_size, _, seq_len, _ = q.shape
+        if position_ids is None:
+            position_ids = (
+                arange(seq_len, device=q.device).unsqueeze(0).expand(batch_size, -1)
+            )
+        if seq_len > self.max_seq_len or self.cos_cached.device != q.device:
+            self._build_cache(max(seq_len, self.max_seq_len), q.device)
+        q_rotated = self.apply_rotary_pos_emb(q, position_ids)
+        k_rotated = self.apply_rotary_pos_emb(k, position_ids)
+        return q_rotated, k_rotated
