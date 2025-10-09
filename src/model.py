@@ -5,7 +5,7 @@ from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import get_tokenizer
 from src.util import get_logging_level_from_config
-from torch import arange, backends, cat, dtype, nn, Tensor
+from torch import arange, backends, cat, dtype, nn, ones, rsqrt, Tensor
 
 
 # Transformer Model.
@@ -35,7 +35,7 @@ class DattaBotModel(nn.Module):
             n_layers=self.n_layers,
             d_model=self.d_model,
         )
-        self.final_norm = nn.LayerNorm(self.d_model)
+        self.final_norm = RMSNorm(dim=self.d_model)
 
     def forward(
         self, input_ids: Tensor, attention_pad_mask: Optional[Tensor] = None
@@ -106,13 +106,13 @@ class TransformerDecoderBlock(nn.Module):
         self.multi_head_attn = TransformerMultiHeadAttention(
             embedded_dim_size=embedded_dim_size
         )
-        self.multi_head_attn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+        self.multi_head_attn_norm = RMSNorm(dim=embedded_dim_size)
         self.multi_head_attn_dropout = nn.Dropout(
             p=get_agent_config().neural_net.zeroed_drop_probability
         )
         # Feed forward.
         self.position_wise_ffn = TransformerPositionWiseFeedForward()
-        self.position_wise_ffn_norm = nn.LayerNorm(normalized_shape=embedded_dim_size)
+        self.position_wise_ffn_norm = RMSNorm(dim=embedded_dim_size)
 
     def forward(
         self, tgt_input: Tensor, attention_mask: Optional[Tensor] = None
@@ -249,3 +249,32 @@ class TransformerScaledDotProductAttention(nn.Module):
             )
         # [batch, 1, seq_len, head_dim] -> [batch, seq_len, head_dim]
         return out.squeeze(1)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        """
+        Root Mean Square Layer Normalization.
+        https://arxiv.org/abs/1910.07467
+
+        Use this instead of regular LayerNorm if we do not want to center around the mean and want no bias.
+        Less memory per normalization layer and faster than LayerNorm.
+
+        Args:
+            eps:  epsilon value
+            dim:  input dimension
+        """
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(ones(dim))
+
+    def _norm(self, x):
+        # Optimized RMSNorm from https://github.com/meta-llama/llama3/blob/main/llama/model.py#L35
+        # Use rsqrt instead of sqrt to avoid division, and do multiplication instead.
+        # Multiplication is faster on GPU, than division.
+        # Also in nvidia GPUs, rsqrt is faster than sqrt in practice.
+        return x * rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
