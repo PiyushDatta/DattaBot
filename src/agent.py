@@ -64,8 +64,14 @@ class Agent:
         # Setup data loader.
         self.data_builder = DattabotDataBuilder()
         # Initialize AMP scaler.
+        # Reduce memory consumption and improve training speed.
+        # https://arxiv.org/abs/1710.03740
         self.scaler = amp.GradScaler()
         # Initialize AdaptiveLogSoftmaxWithLoss.
+        # Vocab size is huge and increases the memory during forward pass by a
+        # lot, to reduce the memory overhead we use AdaptiveLogSoftmaxWithLoss
+        # rather than standard softmax. Tradeoff between accuracy and memory.
+        # https://arxiv.org/abs/1609.04309
         self.loss_fn = nn.AdaptiveLogSoftmaxWithLoss(
             in_features=self.d_model,
             n_classes=self.tokenizer.vocab_size,
