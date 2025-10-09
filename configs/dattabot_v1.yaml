@@ -5,6 +5,8 @@ neural_net:
     hidden_layers: 4096
     zeroed_drop_probability: 0.1
 agent:
+    agent_name: "DattaBot"
+    weights_file_name: "dattabot-weights/DATTABOT_VERSION_1_0_weights.pt"
     batch_size: 32
     max_response_tokens: 512
     max_training_num_epochs: 1_000_000

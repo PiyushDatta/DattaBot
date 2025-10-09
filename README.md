@@ -15,8 +15,6 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
     - `python -m pip install -r requirements.txt`
 4. Download the weights
     - `git clone https://huggingface.co/datapi/dattabot-weights`
-5. Git LFS install and pull the weights (DATTABOT_VERSION_x_x_weights.pt)
-    - `git lfs install && git lfs pull`
 
 # How to interact with bot (run either of them) via client
 

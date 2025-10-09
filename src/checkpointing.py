@@ -32,7 +32,7 @@ def save_agent(
     try:
         # Save with temporary file in the same directory to prevent corruption
         # and ensure the rename operation works correctly.
-        temp_filename = f"tmp_delete_after_{filename}"
+        temp_filename = f"tmp_weights_delete_after.pt"
         # Unwrap model if it's wrapped in DP or DDP
         if isinstance(
             model,

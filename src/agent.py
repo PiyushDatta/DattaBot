@@ -45,7 +45,7 @@ class Agent:
         self.metric_tracker: MetricTracker | None = None
         self.gpu_profiler = None
         # For file names, start with this prefix
-        self.agent_fname_prefix = "DATTABOT_VERSION_1_0"
+        self.agent_name = self.config.agent.agent_name
         self.data_dir = self.config.agent.data_directory
         self.plot_dir = self.config.agent.plot_directory
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
@@ -108,7 +108,7 @@ class Agent:
             anneal_strategy="cos",
         )
         # Load model weights
-        self.weights_fname = f"{self.agent_fname_prefix}_weights.pt"
+        self.weights_fname = self.config.agent.weights_file_name
         load_agent(
             model=self.model,
             filepath=self.weights_fname,
@@ -458,7 +458,7 @@ class Agent:
             training_score=avg_train_loss,
             validation_score=avg_val_loss,
             dataset_name=train_dataloader.dataset_type.value,
-            model_name=self.agent_fname_prefix,
+            model_name=self.agent_name,
             vocab=vocab,
             total_training_time=round(total_training_time, 2),
             total_params_millions=total_params_millions,
