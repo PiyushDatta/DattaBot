@@ -1,9 +1,38 @@
 import logging
 import os
 from datetime import timedelta
-from enum import Enum
+from enum import auto, Enum, IntEnum
 
 from omegaconf import DictConfig
+
+
+class APIActions(Enum):
+    RESPOND_TO_QUERIES = "respond_to_queries"
+    GET_ENCODING = "get_encoding"
+    GET_DECODING = "get_decoding"
+    GET_TENSOR_ENCODING = "get_tensor_encoding"
+    TRAIN_AGENT = "train_agent"
+    GET_RANDOM_VALIDATION_EXAMPLE = "get_random_validation_example"
+    RUN_EVALUATION = "run_evaluation"
+
+
+class AgentAction(IntEnum):
+    # Always keep this as first in enum.
+    NO_ACTION_START = auto()
+    GET_RESPONSES_FOR_QUERIES = auto()
+    GET_ENCODINGS_FOR_QUERIES = auto()
+    GET_DECODINGS_FOR_QUERIES = auto()
+    GET_ENCODED_TENSORS_FOR_QUERIES = auto()
+    TRAIN_AGENT = auto()
+    RUN_EVALUATION = auto()
+    # Always keep this as last in enum.
+    NO_ACTION_END = auto()
+
+
+class EvalBenchmark(Enum):
+    """Supported evaluation benchmarks."""
+
+    HUMANEVAL = "humaneval"
 
 
 class DatasetType(Enum):

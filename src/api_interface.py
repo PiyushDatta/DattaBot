@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-from enum import IntEnum
 from typing import Any, Optional
-
-
-class AgentAction(IntEnum):
-    # Always keep this as first in enum.
-    NO_ACTION_START = 0
-    GET_RESPONSES_FOR_QUERIES = 1
-    GET_ENCODINGS_FOR_QUERIES = 2
-    GET_DECODINGS_FOR_QUERIES = 3
-    GET_ENCODED_TENSORS_FOR_QUERIES = 4
-    TRAIN_AGENT = 5
-    # Always keep this as last in enum.
-    NO_ACTION_END = 6
 
 
 class DattaBotAPIException(Exception):
@@ -76,6 +63,11 @@ class DattaBotAPIResponse:
     def metadata(self) -> dict[str, Any]:
         """Get metadata dictionary."""
         return self._metadata
+
+    @metadata.setter
+    def metadata(self, value: dict[str, Any]) -> None:
+        """Set metadata dictionary."""
+        self._metadata = value
 
     @property
     def raw_text(self) -> str:

@@ -2,8 +2,10 @@ import argparse
 import os
 import subprocess
 import sys
+from typing import Optional
 
-from api_runner import APIActions
+from cli_parser import create_parser, EvalBenchmark
+from src.util import APIActions
 
 
 def detect_num_gpus() -> int:
@@ -104,7 +106,7 @@ def run_client():
     subprocess.run(cmd)
 
 
-def run_tests(test_mode: str = "unit", test_file: str = None):
+def run_tests(test_mode: str = "unit", test_file: Optional[str] = None):
     """
     Run tests with different modes.
 
@@ -160,66 +162,32 @@ def run_tests(test_mode: str = "unit", test_file: str = None):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="DattaBot start and run script!",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run fast unit tests (default)
-  python run.py --test
-  python run.py --test unit
-
-  # Run slow integration tests
-  python run.py --test integration
-
-  # Run all tests
-  python run.py --test all
-
-  # Run specific test file (unit tests only)
-  python run.py --test test_model.py
-
-  # Run specific test file with integration tests
-  python run.py --test integration --test-file test_agent.py
-        """,
-    )
-
-    group = parser.add_mutually_exclusive_group()
-
-    group.add_argument(
-        "--test",
-        nargs="?",
-        const="unit",
-        choices=["unit", "integration", "all"],
-        help="Run tests: 'unit' (fast, default), 'integration' (slow), or 'all'",
-    )
-
-    parser.add_argument(
-        "--test-file",
-        type=str,
-        help="Specific test file to run (e.g., test_model.py)",
-    )
-
-    group.add_argument(
-        "--api_cmd",
-        type=str,
-        help=f"Run API command. Commands: {[action.value for action in APIActions]}",
-    )
-
-    parser.add_argument(
-        "--api_args",
-        type=str,
-        default="",
-        help="Optional arguments for the API command, comma separated if multiple",
-    )
-
+    parser = create_parser()
     args = parser.parse_args()
-
-    if args.test is not None:
-        run_tests(test_mode=args.test, test_file=args.test_file)
-    elif args.api_cmd:
-        process_api_cmd(api_cmd=args.api_cmd, api_args=args.api_args)
-    else:
-        run_client()
+    try:
+        if args.eval:
+            eval_args_str = ",".join(
+                [
+                    str(args.eval),  # benchmark
+                    str(args.batch_size),  # batch_size
+                    str(args.num_samples),  # num_samples
+                    str(args.output_file),  # eval output file
+                    str(args.eval_args),  # extra_args
+                ]
+            )
+            process_api_cmd(
+                api_cmd=APIActions.RUN_EVALUATION.name, api_args=eval_args_str
+            )
+        elif args.test is not None:
+            run_tests(test_mode=args.test, test_file=args.test_file)
+        elif args.api_cmd:
+            process_api_cmd(api_cmd=args.api_cmd, api_args=args.api_args)
+        else:
+            run_client()
+    except Exception as e:
+        print(f"\nError: {e}\n")
+        parser.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -205,7 +205,6 @@ class DattabotDataBuilder:
 
         # Get the properly defined TextDataset class
         TextDataset = _create_text_dataset_class()
-
         os.makedirs(self.data_dir, exist_ok=True)
         train_data, val_data = self.download_dataset()
         vocab = self.build_vocab()
