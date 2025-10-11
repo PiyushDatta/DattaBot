@@ -41,6 +41,7 @@ class DatasetType(Enum):
     WIKITEXT = "wikitext"
     FINANCEQA = "financeqa"
     MMLU_REDUX = "mmlu_redux"
+    STACK_V2_PYTHON = "stack_v2_python"
 
 
 def is_device_cpu(agent_device: str):

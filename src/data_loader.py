@@ -162,7 +162,6 @@ class DattabotDataBuilder:
         if self.dataset_type == DatasetType.AG_NEWS:
             dataset = load_dataset("ag_news", split=["train", "test"])
             return dataset[0], dataset[1]
-
         elif self.dataset_type == DatasetType.OPENWEBTEXT:
             dataset = load_dataset("openwebtext", split="train")
             split_dataset = dataset.train_test_split(test_size=0.2)
@@ -171,17 +170,24 @@ class DattabotDataBuilder:
         elif self.dataset_type == DatasetType.WIKITEXT:
             dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
             return dataset["train"], dataset["validation"]
-
         elif self.dataset_type == DatasetType.FINANCEQA:
             dataset = load_dataset("ibm-research/finqa", split="train")
             split_dataset = dataset.train_test_split(test_size=0.1)
             return split_dataset["train"], split_dataset["test"]
-
         elif self.dataset_type == DatasetType.MMLU_REDUX:
             dataset = load_dataset("mmlu-redux", split="train")
             split_dataset = dataset.train_test_split(test_size=0.1)
             return split_dataset["train"], split_dataset["test"]
-
+        elif self.dataset_type == DatasetType.STACK_V2_PYTHON:
+            # Load only Python files from The Stack v2
+            dataset = load_dataset(
+                "bigcode/the-stack-v2",
+                # Only Python files
+                data_dir="data/Python",
+                split="train",
+            )
+            split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+            return split_dataset["train"], split_dataset["test"]
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset_type}")
 
