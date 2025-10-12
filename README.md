@@ -100,6 +100,44 @@ Answer: 13.6%
 -   Make it the one of the best agents/models in the world
 -   To make the above true, we have to find novel ideas
 
+# Versions and results:
+
+### Base Transformer model (branch: `base_transformer`)
+Final results from training standard GPT transformer.
+
+Training run: https://wandb.ai/dattabot_team/DattaBotV1/runs/e3q134eq
+Weights: https://huggingface.co/datapi/dattabot-weights/blob/main/base_transformer.pt
+Validation loss: 0.083
+Training loss: 0.135
+Number of train tokens: 17 billion
+Eval on HumanEval dataset: 0.0% (0/164)
+
+Eval logs:
+07:33:21 AM UTC - INFO - logger.py - dattabot.info - Saving results to /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl...
+07:33:21 AM UTC - INFO - logger.py - dattabot.info - Running test cases...
+07:33:21 AM UTC - INFO - logger.py - dattabot.info - Downloading HumanEval dataset from HuggingFace...
+07:33:23 AM UTC - INFO - logger.py - dattabot.info - Loaded 164 HumanEval problems
+07:33:23 AM UTC - INFO - logger.py - dattabot.info - Evaluating 164 samples across 164 tasks...
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - Completed 164 evaluations
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - Total passed: 0/164 (0.0%)
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - HumanEval evaluation completed successfully!
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ✓ HUMANEVAL evaluation completed!
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - Results saved to: /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
+07:33:24 AM UTC - INFO - logger.py - dattabot.info -
+======================================================================
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - HUMANEVAL EVALUATION RESULTS
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - Problems Evaluated: 164
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - Samples per Problem: 1
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ----------------------------------------------------------------------
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - SCORES:
+07:33:24 AM UTC - INFO - logger.py - dattabot.info -        pass@1:   0.00% [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ----------------------------------------------------------------------
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - Results saved to: /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
+
 # License
 
 **The MIT License**
