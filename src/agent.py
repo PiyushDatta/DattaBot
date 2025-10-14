@@ -128,10 +128,14 @@ class Agent:
                 self.model,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
+                find_unused_parameters=True,
             )
         self.model.cuda()
         # Setup inference engine when needed.
         self.inference_engine = None
+        self.use_moe = self.config.neural_net.use_moe
+        self.moe_weight = self.config.neural_net.moe_load_balance_weight
+        self.training = False
 
     def _save_agent(self):
         """Helper method to save agent."""
@@ -181,7 +185,7 @@ class Agent:
 
     def _compute_loss(
         self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None
-    ) -> Tensor:
+    ) -> tuple[Tensor, Optional[Tensor]]:
         """
         Compute loss using loss function.
         Args:
@@ -189,9 +193,10 @@ class Agent:
             targets: Tensor of shape (batch_size, seq_len)
             mask: Tensor of shape (batch_size, seq_len)
         Returns:
-            loss: scalar tensor
+            main_loss: scalar tensor (cross-entropy loss)
+            moe_loss: scalar tensor or None (load balancing loss)
         """
-        # flatten to (batch*seq_len, d_model)
+        # Flatten to (batch*seq_len, d_model).
         batch_size, seq_len, d_model = outputs.size()
         outputs_flat = outputs.view(batch_size * seq_len, d_model)
         targets_flat = targets.view(batch_size * seq_len)
@@ -201,8 +206,20 @@ class Agent:
             targets_flat = targets_flat[mask_flat]
         outputs_flat = outputs_flat.to(self.agent_device)
         targets_flat = targets_flat.to(self.agent_device)
+        # Main cross-entropy loss
         loss_output = self.loss_fn(outputs_flat, targets_flat)
-        return loss_output.loss
+        main_loss = loss_output.loss
+        # MoE auxiliary loss (only during training)
+        moe_loss = None
+        if self.training and self.use_moe:
+            if isinstance(
+                self.model,
+                (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel),
+            ):
+                moe_loss = self.model.module.get_load_balancing_loss()
+            else:
+                moe_loss = self.model.get_load_balancing_loss()
+        return main_loss, moe_loss
 
     def _get_attention_pad_mask(self, input_ids: Tensor) -> Tensor:
         """
@@ -237,6 +254,21 @@ class Agent:
             f"Got {attention_pad_mask.shape}, expected {expected_shape}"
         )
         return attention_pad_mask
+
+    def _get_gpu_info(self) -> list[str]:
+        gpu_name = "Could not retrieve gpu_name"
+        total_memory = "Could not retrieve total_memory"
+        total_cores = "Could not retrieve total_cores"
+        if torch.cuda.is_available() and self.agent_device != "cpu":
+            gpu_name = torch.cuda.get_device_name(self.agent_device)
+            # Convert bytes to MB
+            total_memory = torch.cuda.get_device_properties(
+                self.agent_device
+            ).total_memory // (1024**2)
+            total_cores = torch.cuda.get_device_properties(
+                self.agent_device
+            ).multi_processor_count
+        return gpu_name, total_memory, total_cores
 
     @property
     def tokenizer_obj(self):
@@ -275,6 +307,8 @@ class Agent:
         )
         self.gpu_profiler.start()
         mp.set_start_method("spawn", force=True)
+        torch.cuda.reset_peak_memory_stats(self.agent_device)
+        self.training = True
 
     def end_training_session(self):
         self.logger.info("Agent's training session has ended.")
@@ -286,6 +320,7 @@ class Agent:
             self.gpu_profiler.stop()
         self.train_batch_idx = 0
         self.val_batch_idx = 0
+        self.training = False
 
     def train_agent(self) -> DattaBotAPIResponse:
         """
@@ -486,6 +521,8 @@ class Agent:
         """
         self.model.train()
         total_loss = 0.0
+        total_main_loss = 0.0
+        total_moe_loss = 0.0
         total_steps = 0
         total_tokens = 0
         log_and_plot_every_x_steps = (
@@ -524,9 +561,13 @@ class Agent:
                 # Calculate loss.
                 self.gpu_profiler.log_gpu_memory("Training - before loss")
                 padding_mask = labels != self.tokenizer.pad_token_id
-                loss = self._compute_loss(
+                main_loss, moe_loss = self._compute_loss(
                     outputs=logits, targets=labels, mask=padding_mask
                 )
+                if moe_loss is not None:
+                    loss = main_loss + self.moe_weight * moe_loss
+                else:
+                    loss = main_loss
                 self.gpu_profiler.log_gpu_memory("Training - after loss")
             # Backprop.
             if self.scaler:
@@ -551,10 +592,15 @@ class Agent:
                 self.lr_scheduler.step()
             # Update metrics
             total_loss += loss.item()
+            total_main_loss += main_loss.item()
+            if moe_loss is not None:
+                total_moe_loss += moe_loss.item()
             total_steps += 1
             # Count only non-pad tokens
             total_tokens += padding_mask.sum().item()
             avg_loss = total_loss / total_steps
+            avg_main_loss = total_main_loss / total_steps
+            avg_moe_loss = total_moe_loss / total_steps if moe_loss is not None else 0.0
             loss_per_token = (
                 total_loss / total_tokens if total_tokens > 0 else float("inf")
             )
@@ -562,26 +608,36 @@ class Agent:
             progress_bar.set_postfix(
                 {
                     "loss": avg_loss,
+                    "main_loss": avg_main_loss,
+                    "moe_loss": avg_moe_loss,
                     "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
                 }
             )
             # Log metrics using MetricTracker
             if is_rank_0():
-                self.metric_tracker.log_metrics(
-                    {
-                        "train/batch_loss": loss.item(),
-                        "train/batch_perplexity": torch.exp(loss).item(),
-                        "train/learning_rate": self.optimizer.param_groups[0]["lr"],
-                        "train/loss_per_token": loss_per_token,
-                    },
-                    step=None,
-                )
+                metrics = {
+                    "train/batch_loss": loss.item(),
+                    "train/batch_main_loss": main_loss.item(),
+                    "train/batch_perplexity": torch.exp(main_loss).item(),
+                    "train/learning_rate": self.optimizer.param_groups[0]["lr"],
+                    "train/loss_per_token": loss_per_token,
+                }
+                if moe_loss is not None:
+                    metrics["train/batch_moe_loss"] = moe_loss.item()
+                    metrics["train/moe_weight"] = self.moe_weight
+                self.metric_tracker.log_metrics(metrics, step=None)
                 if total_steps % log_and_plot_every_x_steps == 0:
+                    moe_str = (
+                        f", moe_loss={moe_loss.item():.4f}"
+                        if moe_loss is not None
+                        else ""
+                    )
                     self.logger.info(
                         f"[Epoch {epoch_num} | Step {total_steps}] "
-                        f"loss={loss.item():.4f}, "
-                        f"perplexity={torch.exp(loss).item():.2f}, "
-                        f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
+                        f"total_loss={loss.item():.4f}, "
+                        f"main_loss={main_loss.item():.4f}{moe_str}, "
+                        f"perplexity={torch.exp(main_loss).item():.2f}, "
+                        f"lr={self.optimizer.param_groups[0]['lr']:.2e}, "
                         f"loss/token={loss_per_token:.4f}"
                     )
                     latest_metrics = self.gpu_profiler.get_latest_metrics()
@@ -647,7 +703,7 @@ class Agent:
                     ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
                     # Calculate loss.
                     padding_mask = labels != self.tokenizer.pad_token_id
-                    loss = self._compute_loss(
+                    loss, _ = self._compute_loss(
                         outputs=logits, targets=labels, mask=padding_mask
                     )
                 total_loss += loss.item()
@@ -803,17 +859,11 @@ class Agent:
         num_batches = ceil(len(queries) / self.batch_size)
         return tensor, num_batches
 
-    def _get_gpu_info(self) -> list[str]:
-        gpu_name = "Could not retrieve gpu_name"
-        total_memory = "Could not retrieve total_memory"
-        total_cores = "Could not retrieve total_cores"
-        if torch.cuda.is_available() and self.agent_device != "cpu":
-            gpu_name = torch.cuda.get_device_name(self.agent_device)
-            # Convert bytes to MB
-            total_memory = torch.cuda.get_device_properties(
-                self.agent_device
-            ).total_memory // (1024**2)
-            total_cores = torch.cuda.get_device_properties(
-                self.agent_device
-            ).multi_processor_count
-        return gpu_name, total_memory, total_cores
+    def profile_training(self, num_steps=20, log_dir: Optional[str] = None):
+        """
+        Create an AgentProfiler and run the training profiler.
+        """
+        from src.agent_profiler import AgentProfiler
+
+        profiler = AgentProfiler(self, log_dir=log_dir)
+        return profiler.profile_training(num_steps=num_steps)

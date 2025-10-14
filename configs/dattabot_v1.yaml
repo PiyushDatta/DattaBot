@@ -1,14 +1,21 @@
 neural_net:
-    n_layers: 24
-    n_heads: 16
+    n_layers: 16
+    n_heads: 8
     model_dimensions: 1024
-    hidden_layers: 4096
+    hidden_layers: 1024
     zeroed_drop_probability: 0.1
+    gradient_checkpointing: true
+    # MoE Configuration
+    use_moe: true
+    num_experts: 4
+    num_experts_per_token: 2
+    expert_capacity_factor: 1.25
+    moe_load_balance_weight: 0.01
 agent:
     agent_name: "DattaBot"
     weights_file_name: "dattabot-weights/DATTABOT_VERSION_1_0_weights.pt"
-    batch_size: 32
-    max_response_tokens: 512
+    batch_size: 8
+    max_response_tokens: 256
     max_training_num_epochs: 1_000_000
     max_train_tokens: -1
     max_train_time_hours: 10

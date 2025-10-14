@@ -10,7 +10,7 @@ from torch import ones, Tensor
 def test_agent_action_enum():
     assert AgentAction.NO_ACTION_START.value == 1
     assert AgentAction.GET_RESPONSES_FOR_QUERIES.value == 2
-    assert AgentAction.NO_ACTION_END.value == 8
+    assert AgentAction.NO_ACTION_END.value == 9
     assert int(AgentAction.TRAIN_AGENT) == 6
     assert list(AgentAction) == [
         AgentAction.NO_ACTION_START,
@@ -20,6 +20,7 @@ def test_agent_action_enum():
         AgentAction.GET_ENCODED_TENSORS_FOR_QUERIES,
         AgentAction.TRAIN_AGENT,
         AgentAction.RUN_EVALUATION,
+        AgentAction.PROFILE_AGENT_TRAINING,
         AgentAction.NO_ACTION_END,
     ]
 

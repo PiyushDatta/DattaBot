@@ -159,7 +159,9 @@ class TestDattaBotInferenceEngine:
         """Test batch text generation."""
         texts = ["Hello world", "How are you?", "What is AI?"]
 
-        responses = inference_engine.batch_generate(texts, max_new_tokens=10)
+        # Mock distributed module to prevent gather_object from being called
+        with patch("src.inference_engine.dist.is_initialized", return_value=False):
+            responses = inference_engine.batch_generate(texts, max_new_tokens=10)
 
         assert len(responses) == len(texts)
         for i, response in enumerate(responses):

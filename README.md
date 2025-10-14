@@ -40,6 +40,20 @@ For manual: Use `--help`, like so: `python run.py --help`
 
 `python run.py --test all`
 
+# How to train agent/model
+
+`python run.py --api_cmd "train_agent"`
+
+# How to run agent profiling
+- To use:
+
+    `python run.py --api_cmd profile_agent_training --api_args ''`
+
+- To analyze:
+
+    `tensorboard --logdir=/home/piydatta/DattaBot/dattabot_data_dir/agent_train_profiler`
+
+
 # How to test api
 
 `python run.py --api_cmd "<API COMMAND>" --api_args "<API_ARGS>"`
@@ -74,10 +88,6 @@ entergy corporation and subsidiaries notes to financial statements as of decembe
 ```
 
 Answer: 13.6%
-
-# How to train agent/model
-
--   `python run.py --api_cmd "train_agent"`
 
 # Dependencies
 

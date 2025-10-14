@@ -14,6 +14,7 @@ class APIActions(Enum):
     TRAIN_AGENT = "train_agent"
     GET_RANDOM_VALIDATION_EXAMPLE = "get_random_validation_example"
     RUN_EVALUATION = "run_evaluation"
+    PROFILE_AGENT_TRAINING = "profile_agent_training"
 
 
 class AgentAction(IntEnum):
@@ -25,6 +26,7 @@ class AgentAction(IntEnum):
     GET_ENCODED_TENSORS_FOR_QUERIES = auto()
     TRAIN_AGENT = auto()
     RUN_EVALUATION = auto()
+    PROFILE_AGENT_TRAINING = auto()
     # Always keep this as last in enum.
     NO_ACTION_END = auto()
 

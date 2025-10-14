@@ -79,6 +79,15 @@ def process_api_cmd(api_cmd: str, api_args_str: str):
             print(
                 f"Raw text from validation example. Sequence length of raw text: {len(raw_text)}.\n=====START=====\n{raw_text}\n=====END====="
             )
+        case APIActions.PROFILE_AGENT_TRAINING.name:
+            num_steps = int(api_args[0]) if len(api_args) > 0 and api_args[0] else 20
+            log_dir = api_args[1] if len(api_args) > 1 and api_args[1] else None
+            responses: list[DattaBotAPIResponse] = api_client.profile_agent_training(
+                queries=[str(num_steps), log_dir]
+            )
+            if responses:
+                for i, response in enumerate(responses, start=1):
+                    print(f"\nProfile Response {i}:\n{response.text}\n")
         case _:
             logger.error(
                 f"API Command selected: {api_cmd}. This is an invalid API command."

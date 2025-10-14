@@ -80,6 +80,12 @@ class DattaBotAPI:
     def run_evaluation(self, queries: list[str]) -> list[DattaBotAPIResponse]:
         return self._get_agent_action(queries, AgentAction.RUN_EVALUATION)
 
+    def profile_agent_training(self, queries: list[str]) -> list[DattaBotAPIResponse]:
+        """
+        Profiles the agent's training loop for a limited number of steps.
+        """
+        return self._get_agent_action(queries, AgentAction.PROFILE_AGENT_TRAINING)
+
     # --- Internal helper ---
     def _get_agent_action(
         self, queries: List[str], action_type: AgentAction
@@ -140,6 +146,13 @@ class DattaBotAPI:
                         )
                     else:
                         raise DattaBotAPIException("No evaluation parameters provided")
+                case AgentAction.PROFILE_AGENT_TRAINING:
+                    self._ensure_agent()
+                    assert self._agent is not None, "Agent is not set up."
+                    num_steps = int(queries[0]) if len(queries) > 0 else 20
+                    log_dir = queries[1] if len(queries) > 1 else None
+                    self._agent.profile_training(num_steps=num_steps, log_dir=log_dir)
+                    responses[0].text = "Profiled training successfully."
                 case _:
                     raise DattaBotAPIException("Incorrect agent action requested.")
         except Exception as err:
