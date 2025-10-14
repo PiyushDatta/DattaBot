@@ -128,7 +128,7 @@ class Agent:
                 self.model,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
-                find_unused_parameters=True,
+                find_unused_parameters=False,
             )
         self.model.cuda()
         # Setup inference engine when needed.

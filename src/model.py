@@ -181,27 +181,27 @@ class TransformerDecoderBlock(nn.Module):
             attention_mask: [batch, seq_len, seq_len] causal mask (optional)
         """
         # 1. Masked self-attention + residual connection.
-        output = self.multi_head_attn_norm(tgt_input)
+        norm_output = self.multi_head_attn_norm(tgt_input)
         if self.gradient_checkpointing and self.training:
             attn_output = torch_utils.checkpoint.checkpoint(
                 self.multi_head_attn,
-                output,
-                output,
-                output,
+                norm_output,
+                norm_output,
+                norm_output,
                 attention_mask,
                 position_ids,
                 use_reentrant=False,
             )
         else:
-            output = self.multi_head_attn(
-                input_query=output,
-                input_key=output,
-                input_value=output,
+            attn_output = self.multi_head_attn(
+                input_query=norm_output,
+                input_key=norm_output,
+                input_value=norm_output,
                 mask=attention_mask,
                 position_ids=position_ids,
             )
-        output = self.multi_head_attn_dropout(output)
-        output = tgt_input + output
+        attn_output = self.multi_head_attn_dropout(attn_output)
+        output = tgt_input + attn_output
         # 2. Feed-forward network + residual connection
         ffn_norm_output = self.position_wise_ffn_norm(output)
         if self.gradient_checkpointing and self.training:
@@ -261,64 +261,15 @@ class TransformerMultiHeadAttention(nn.Module):
         super().__init__()
         self.config = get_agent_config()
         self.n_heads = self.config.neural_net.n_heads
-        self.attention_output_size = embedded_dim_size // self.n_heads
-        self.attention_layers = nn.ModuleList(
-            [
-                TransformerScaledDotProductAttention(
-                    output_size=self.attention_output_size,
-                    embedded_dim_size=embedded_dim_size,
-                )
-                for _ in range(self.n_heads)
-            ]
-        )
-        self.concat_layer = nn.Linear(embedded_dim_size, embedded_dim_size)
-
-    def forward(
-        self,
-        input_query: Tensor,
-        input_key: Tensor,
-        input_value: Tensor,
-        mask: Tensor,
-        position_ids: Optional[Tensor] = None,
-    ) -> Tensor:
-        attention_score = cat(
-            [
-                layer(
-                    query=input_query,
-                    key=input_key,
-                    value=input_value,
-                    mask=mask,
-                    position_ids=position_ids,
-                )
-                for layer in self.attention_layers
-            ],
-            dim=-1,
-        )
-        return self.concat_layer(attention_score)
-
-
-class TransformerScaledDotProductAttention(nn.Module):
-    def __init__(self, output_size, embedded_dim_size: int) -> None:
-        super().__init__()
-        self.config = get_agent_config()
-        self.logger = get_logger(
-            logging_level=get_logging_level_from_config(self.config)
-        )
-        self.output_size = output_size
-        self.pad_id = get_tokenizer().pad_token_id
-        self.query_layer = nn.Linear(
-            in_features=embedded_dim_size, out_features=output_size
-        )
-        self.key_layer = nn.Linear(
-            in_features=embedded_dim_size, out_features=output_size
-        )
-        self.value_layer = nn.Linear(
-            in_features=embedded_dim_size, out_features=output_size
-        )
-        # RoPE for relative positional encoding
+        self.d_model = embedded_dim_size
+        self.head_dim = embedded_dim_size // self.n_heads
+        # Single linear layers for all heads (batched)
+        self.q_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.k_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.v_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.o_proj = nn.Linear(self.d_model, self.d_model, bias=False)
         self.rope = RotaryPositionalEmbedding(
-            dim=output_size,
-            # Allow twice the extrapolation
+            dim=self.head_dim,
             max_seq_len=self.config.agent.max_response_tokens * 2,
             device=self.config.env.device,
         )
@@ -326,48 +277,43 @@ class TransformerScaledDotProductAttention(nn.Module):
 
     def forward(
         self,
-        query: Tensor,
-        key: Tensor,
-        value: Tensor,
-        # TODO(PiyushDatta): Figure out what to do with the mask, we are padding the sequences.
+        input_query: Tensor,
+        input_key: Tensor,
+        input_value: Tensor,
         mask: Optional[Tensor] = None,
         position_ids: Optional[Tensor] = None,
     ) -> Tensor:
-        # [batch_size, seq_len, d_model]
-        _, tgt_len, _ = query.size()
-        sequence_len = key.size()[1]
-        assert sequence_len == tgt_len, (
-            f"Sequence length must equal target length! "
-            f"Got {sequence_len}, expected {tgt_len}"
-        )
-        query = self.query_layer(query)
-        key = self.key_layer(key)
-        value = self.value_layer(value)
-        # PyTorch SDPA expects [batch, n_heads, seq, head_dim]
-        # Right now, each "attention head" is wrapped in TransformerMultiHeadAttention,
-        # so q/k/v are already split per head. Shapes are [batch, seq_len, head_dim].
-        # [batch, 1, seq_len, head_dim]
-        query = query.unsqueeze(1)
-        key = key.unsqueeze(1)
-        value = value.unsqueeze(1)
-        # Apply RoPE to Q and K (but not to V)
-        query, key = self.rope(query, key, position_ids)
-        # Use SDPA (dispatches to FlashAttention if available)
+        batch_size, seq_len, d_model = input_query.shape
+        q = self.q_proj(input_query)
+        k = self.k_proj(input_key)
+        v = self.v_proj(input_value)
+        # Reshape to split heads: [batch, seq, d_model] -> [batch, seq, n_heads, head_dim]
+        q = q.view(batch_size, seq_len, self.n_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.n_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.n_heads, self.head_dim)
+        # Transpose for attention: [batch, n_heads, seq, head_dim]
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        # Rope to all head at once.
+        q, k = self.rope(q, k, position_ids)
+        # Flash Attention (batched across all heads).
         with backends.cuda.sdp_kernel(
             enable_flash=backends.cuda.flash_sdp_enabled(),
             enable_math=False,
             enable_mem_efficient=False,
         ):
-            out = nn.functional.scaled_dot_product_attention(
-                query=query,
-                key=key,
-                value=value,
+            out = F.scaled_dot_product_attention(
+                query=q,
+                key=k,
+                value=v,
                 attn_mask=None,
                 dropout_p=self.dropout.p if self.training else 0.0,
                 is_causal=True,
             )
-        # [batch, 1, seq_len, head_dim] -> [batch, seq_len, head_dim]
-        return out.squeeze(1)
+        # Merge heads.
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        return self.o_proj(out)
 
 
 class RMSNorm(nn.Module):
@@ -443,25 +389,46 @@ class RotaryPositionalEmbedding(nn.Module):
         return cat([-x2, x1], dim=-1)
 
     def apply_rotary_pos_emb(self, x: Tensor, position_ids: Tensor) -> Tensor:
-        """Apply rotary embeddings to input tensor."""
+        """Apply rotary embeddings to input tensor.
+        Args:
+            x: [batch, n_heads, seq, head_dim] or [batch, seq, head_dim]
+            position_ids: [batch, seq]
+        Returns:
+            Rotated tensor with same shape as x
+        """
+        # Index cos/sin cache: [batch, seq, head_dim].
         cos = self.cos_cached[position_ids].to(x.device)
         sin = self.sin_cached[position_ids].to(x.device)
-        if x.dim() == 4 and x.shape[1] != position_ids.shape[1]:
+        # Unsqueeze for multi-head attention if needed.
+        if x.dim() == 4:
+            # x: [batch, n_heads, seq, head_dim]
+            # cos/sin: [batch, seq, head_dim]
+            # Unsqueeze to [batch, 1, seq, head_dim] for broadcasting
             cos = cos.unsqueeze(1)
             sin = sin.unsqueeze(1)
         return (x * cos) + (self.rotate_half(x) * sin)
 
     def forward(
-        self, q: Tensor, k: Tensor, position_ids: Tensor = None
+        self, q: Tensor, k: Tensor, position_ids: Optional[Tensor] = None
     ) -> tuple[Tensor, Tensor]:
-        """Apply RoPE to query and key."""
+        """Apply RoPE to query and key tensors.
+        Args:
+            q: [batch, n_heads, seq, head_dim]
+            k: [batch, n_heads, seq, head_dim]
+            position_ids: [batch, seq] or None
+        Returns:
+            (q_rotated, k_rotated)
+        """
         batch_size, _, seq_len, _ = q.shape
+        # Generate position IDs if not provided.
         if position_ids is None:
             position_ids = (
                 arange(seq_len, device=q.device).unsqueeze(0).expand(batch_size, -1)
             )
+        # Rebuild cache if needed.
         if seq_len > self.max_seq_len or self.cos_cached.device != q.device:
             self._build_cache(max(seq_len, self.max_seq_len), q.device)
+        # Apply rotation.
         q_rotated = self.apply_rotary_pos_emb(q, position_ids)
         k_rotated = self.apply_rotary_pos_emb(k, position_ids)
         return q_rotated, k_rotated
