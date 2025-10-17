@@ -4,16 +4,19 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
 
 # How to install and setup
 
-1. Setup a virtual environment
+1. Make sure you have `uv` installed
+    - https://docs.astral.sh/uv/getting-started/installation/#installation-methods
+2. Setup a virtual environment
     - `python3.10 -m venv <directory>`
     - example: `python3.10 -m venv dattabot_venv`
-2. Activate the virtual environment
+    - using uv: `uv venv -p 3.10 dattabot_venv`
+3. Activate the virtual environment
     - Windows cmd: `dattabot_venv\Scripts\activate.bat`
     - Windows powershell: `dattabot_venv\Scripts\Activate.ps1`
     - Linux/Mac/Other: `source dattabot_venv/bin/activate`
-3. Pip install all dependencies
+4. Pip install all dependencies
     - `python -m pip install -r requirements.txt`
-4. Download the weights
+5. Download the weights
     - `git clone https://huggingface.co/datapi/dattabot-weights`
 
 # How to interact with bot (run either of them) via client
@@ -45,14 +48,14 @@ For manual: Use `--help`, like so: `python run.py --help`
 `python run.py --api_cmd "train_agent"`
 
 # How to run agent profiling
-- To use:
+
+-   To use:
 
     `python run.py --api_cmd profile_agent_training --api_args ''`
 
-- To analyze:
+-   To analyze:
 
     `tensorboard --logdir=/home/piydatta/DattaBot/dattabot_data_dir/agent_train_profiler`
-
 
 # How to test api
 
@@ -113,6 +116,7 @@ Answer: 13.6%
 # Versions and results:
 
 ### Base Transformer model (branch: `base_transformer`)
+
 Final results from training standard GPT transformer.
 
 Training run: https://wandb.ai/dattabot_team/DattaBotV1/runs/e3q134eq
@@ -143,7 +147,7 @@ Eval logs:
 07:33:24 AM UTC - INFO - logger.py - dattabot.info - Samples per Problem: 1
 07:33:24 AM UTC - INFO - logger.py - dattabot.info - ----------------------------------------------------------------------
 07:33:24 AM UTC - INFO - logger.py - dattabot.info - SCORES:
-07:33:24 AM UTC - INFO - logger.py - dattabot.info -        pass@1:   0.00% [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
+07:33:24 AM UTC - INFO - logger.py - dattabot.info - pass@1: 0.00% [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
 07:33:24 AM UTC - INFO - logger.py - dattabot.info - ----------------------------------------------------------------------
 07:33:24 AM UTC - INFO - logger.py - dattabot.info - Results saved to: /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl
 07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
