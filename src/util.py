@@ -103,11 +103,12 @@ def get_logging_level_from_config(config: DictConfig) -> int:
 def setup_torch_dist_init():
     """Initialize torch distributed - imports only when called"""
     import torch.distributed as dist
+    from torch.cuda import device_count as torch_device_count
 
     if not dist.is_available() or dist.is_initialized():
         return
     # Detect if we're running under torchrun or another distributed launcher.
-    torchrun_set = "NODE_RANK" in os.environ
+    torchrun_set: bool = torch_device_count() > 1
     if not torchrun_set:
         print(
             "[setup_torch_dist_init] No torchrun environment detected, running single process."
