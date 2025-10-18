@@ -136,6 +136,15 @@ class Agent:
         self.moe_weight = self.config.neural_net.moe_load_balance_weight
         self.training = False
 
+    def __del__(self) -> None:
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Clean up distributed process group if initialized."""
+        if dist.is_available() and dist.is_initialized():
+            self.logger.info("Destroying distributed process group...")
+            dist.destroy_process_group()
+
     def _save_agent(self):
         """Helper method to save agent."""
         save_agent(

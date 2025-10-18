@@ -254,7 +254,8 @@ class DattaBotInferenceEngine:
 
         for step in range(max_new_tokens):
             with torch.no_grad():
-                with amp.autocast(
+                with torch.autocast(
+                    device_type=self.device,
                     enabled=(not is_device_cpu(self.device)),
                     dtype=torch.bfloat16,
                 ):

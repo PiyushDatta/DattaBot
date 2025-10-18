@@ -55,7 +55,8 @@ class AgentProfiler:
                     input_ids=input_ids
                 )
                 self.agent.optimizer.zero_grad()
-                with torch.cuda.amp.autocast(
+                with torch.autocast(
+                    device_type=self.agent.agent_device,
                     enabled=(not is_device_cpu(self.agent.agent_device)),
                     dtype=torch.bfloat16,
                 ):

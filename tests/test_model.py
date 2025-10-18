@@ -26,7 +26,8 @@ def test_decoder_only_forward(batch_size, seq_len):
     assert labels.shape == (batch_size, seq_len)
 
     # Foward pass.
-    with amp.autocast(
+    with torch.autocast(
+        device_type=model.device,
         enabled=True,
         dtype=torch.bfloat16,
     ):
