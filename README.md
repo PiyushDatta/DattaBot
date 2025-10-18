@@ -9,13 +9,14 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
 2. Setup a virtual environment
     - `python3.10 -m venv <directory>`
     - example: `python3.10 -m venv dattabot_venv`
-    - using uv: `uv venv -p 3.10 dattabot_venv`
+    - using uv: `uv venv dattabot_venv`
 3. Activate the virtual environment
     - Windows cmd: `dattabot_venv\Scripts\activate.bat`
     - Windows powershell: `dattabot_venv\Scripts\Activate.ps1`
     - Linux/Mac/Other: `source dattabot_venv/bin/activate`
 4. Pip install all dependencies
-    - `python -m pip install -r requirements.txt`
+    - `uv pip install -r pyproject.toml`
+    - `export UV_PROJECT_ENVIRONMENT=./dattabot_venv && uv sync`
 5. Download the weights
     - `git clone https://huggingface.co/datapi/dattabot-weights`
 

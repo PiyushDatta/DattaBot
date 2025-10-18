@@ -4,7 +4,6 @@ from math import ceil
 from typing import Optional
 
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import tqdm
@@ -66,7 +65,7 @@ class Agent:
         # Initialize AMP scaler.
         # Reduce memory consumption and improve training speed.
         # https://arxiv.org/abs/1710.03740
-        self.scaler = amp.GradScaler()
+        self.scaler = torch.amp.GradScaler(device=self.agent_device)
         # Initialize AdaptiveLogSoftmaxWithLoss.
         # Vocab size is huge and increases the memory during forward pass by a
         # lot, to reduce the memory overhead we use AdaptiveLogSoftmaxWithLoss
@@ -178,8 +177,8 @@ class Agent:
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
         self.agent_device = self.config.env.device
         torch.cuda.empty_cache()
 
@@ -542,7 +541,8 @@ class Agent:
             attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
             # Zero the gradients.
             self.optimizer.zero_grad()
-            with amp.autocast(
+            with torch.autocast(
+                device_type=self.agent_device,
                 enabled=(not is_device_cpu(self.agent_device)),
                 dtype=torch.bfloat16,
             ):
@@ -688,7 +688,8 @@ class Agent:
                 )
                 batch_size = input_ids.shape[0]
                 attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
-                with amp.autocast(
+                with torch.autocast(
+                    device_type=self.agent_device,
                     enabled=(not is_device_cpu(self.agent_device)),
                     dtype=torch.bfloat16,
                 ):

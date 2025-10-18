@@ -26,6 +26,7 @@ from torch import (
     utils as torch_utils,
     zeros,
 )
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 
 # Transformer Model.
@@ -298,11 +299,7 @@ class TransformerMultiHeadAttention(nn.Module):
         # Rope to all head at once.
         q, k = self.rope(q, k, position_ids)
         # Flash Attention (batched across all heads).
-        with backends.cuda.sdp_kernel(
-            enable_flash=backends.cuda.flash_sdp_enabled(),
-            enable_math=False,
-            enable_mem_efficient=False,
-        ):
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
             out = F.scaled_dot_product_attention(
                 query=q,
                 key=k,
