@@ -104,11 +104,22 @@ def setup_torch_dist_init():
     """Initialize torch distributed - imports only when called"""
     import torch.distributed as dist
 
-    if dist.is_available() and not dist.is_initialized():
-        os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
-        dist.init_process_group(
-            backend="nccl",
-            init_method="env://",
-            # 60 minutes.
-            timeout=timedelta(seconds=3600),
+    if not dist.is_available() or dist.is_initialized():
+        return
+    # Detect if we're running under torchrun or another distributed launcher.
+    torchrun_set = "NODE_RANK" in os.environ
+    if not torchrun_set:
+        print(
+            "[setup_torch_dist_init] No torchrun environment detected, running single process."
         )
+        return
+    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        # 60 minutes.
+        timeout=timedelta(seconds=3600),
+    )
+    print(
+        f"[setup_torch_dist_init] Initialized distributed (rank={dist.get_rank()}, world_size={dist.get_world_size()})"
+    )
