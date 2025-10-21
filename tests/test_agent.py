@@ -20,6 +20,8 @@ def test_is_device_cpu():
 def mock_agent():
     """Create a mocked agent for fast unit tests."""
     with patch("src.agent.Agent") as MockAgent:
+        from torch import device as torch_device
+
         agent = MockAgent.return_value
 
         # Mock tokenizer
@@ -39,7 +41,7 @@ def mock_agent():
 
         # Mock attributes
         agent.batch_size = 4
-        agent.device = "cpu"
+        agent.device = torch_device("cpu")
 
         # Mock convert_queries_to_tensors
         def mock_convert(queries):

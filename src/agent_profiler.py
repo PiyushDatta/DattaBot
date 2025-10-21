@@ -56,8 +56,8 @@ class AgentProfiler:
                 )
                 self.agent.optimizer.zero_grad()
                 with torch.autocast(
-                    device_type=self.agent.agent_device,
-                    enabled=(not is_device_cpu(self.agent.agent_device)),
+                    device_type=self.agent.agent_device.type,
+                    enabled=(not is_device_cpu(self.agent.agent_device.type)),
                     dtype=torch.bfloat16,
                 ):
                     logits = self.agent.model(

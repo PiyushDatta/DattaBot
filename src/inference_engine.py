@@ -72,6 +72,7 @@ class DattaBotInferenceEngine:
                 self.device = f"cuda:{dist.get_rank()}"
         else:
             self.device = device
+        self.device = torch.device(self.device)
         self.model = model
         self.model.eval()
         # Setup tokenizer
@@ -85,7 +86,8 @@ class DattaBotInferenceEngine:
         assert hasattr(
             self.agent_config.neural_net, "model_dimensions"
         ), "Config must have neural_net.model_dimensions"
-        self.adaptive_softmax = adaptive_softmax
+        self.inference_autocast_dtype = torch.bfloat16
+        self.adaptive_softmax = adaptive_softmax.to(dtype=self.inference_autocast_dtype)
         self.logger.info(
             f"Inference engine initialized on {self.device} with vocab_size={self.vocab_size}"
         )
@@ -255,9 +257,9 @@ class DattaBotInferenceEngine:
         for step in range(max_new_tokens):
             with torch.no_grad():
                 with torch.autocast(
-                    device_type=self.device,
-                    enabled=(not is_device_cpu(self.device)),
-                    dtype=torch.bfloat16,
+                    device_type=self.device.type,
+                    enabled=(not is_device_cpu(self.device.type)),
+                    dtype=self.inference_autocast_dtype,
                 ):
                     # Forward pass through model
                     logits = self.model(generated)  # [batch, seq_len, d_model]
@@ -410,16 +412,20 @@ class DattaBotInferenceEngine:
     def _project_to_vocab(self, hidden_states: Tensor) -> Tensor:
         """
         Project hidden states to vocabulary logits using adaptive softmax.
-
         Args:
             hidden_states: [batch, d_model]
-
         Returns:
             logits: [batch, vocab_size]
         """
         # Use the adaptive softmax log_prob method
         # We need to get full vocabulary distribution
         batch_size = hidden_states.size(0)
+        # IMPORTANT: Ensure dtype consistency between hidden_states and adaptive_softmax.
+        # On CPU, autocast is disabled, so hidden_states might be float32 while adaptive_softmax is bfloat16.
+        # On GPU, both should already be bfloat16 due to autocast.
+        target_dtype = self.adaptive_softmax.head.weight.dtype
+        if hidden_states.dtype != target_dtype:
+            hidden_states = hidden_states.to(dtype=target_dtype)
         # Get logits for all clusters
         head_logits = hidden_states @ self.adaptive_softmax.head.weight.t()
         if self.adaptive_softmax.head.bias is not None:

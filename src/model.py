@@ -71,6 +71,10 @@ class DattaBotModel(nn.Module):
             "Gradient checkpointing enabled for all decoder layers.", all_ranks=True
         )
 
+    @property
+    def layers(self):
+        return self.decoder_stack.layers
+
     def forward(
         self, input_ids: Tensor, attention_pad_mask: Optional[Tensor] = None
     ) -> Tensor:

@@ -103,6 +103,7 @@ def get_logging_level_from_config(config: DictConfig) -> int:
 def setup_torch_dist_init():
     """Initialize torch distributed - imports only when called"""
     import torch.distributed as dist
+    from torch import device as torch_device
     from torch.cuda import device_count as torch_device_count
 
     if not dist.is_available() or dist.is_initialized():
@@ -115,12 +116,36 @@ def setup_torch_dist_init():
         )
         return
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch_device(f"cuda:{local_rank}")
+    backend = dist.get_default_backend_for_device(device)
     dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
+        backend=backend,
         # 60 minutes.
         timeout=timedelta(seconds=3600),
     )
+    dist_barrier(device=device)
     print(
         f"[setup_torch_dist_init] Initialized distributed (rank={dist.get_rank()}, world_size={dist.get_world_size()})"
     )
+
+
+def dist_barrier(device: "torch.device") -> None:
+    """Helper method to synchronize agent if model is distributed."""
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        from src.logger import get_logger
+
+        logger = get_logger()
+        rank = dist.get_rank()
+        logger.debug(
+            f"Starting dist.barrier(), rank: {rank}, device: {device}",
+            all_ranks=True,
+        )
+        dist.barrier(device_ids=([device.index] if device.type == "cuda" else None))
+        # dist.barrier()
+        logger.debug(
+            f"Done dist.barrier(), rank: {rank}, device: {device}",
+            all_ranks=True,
+        )

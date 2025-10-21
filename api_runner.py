@@ -1,5 +1,25 @@
+import warnings
 from argparse import ArgumentParser
 from enum import Enum
+
+
+def suppress_pydantic_warnings():
+    # Suppress warnings about field attributes (repr, frozen, etc.) in Pydantic
+    warnings.filterwarnings(
+        "ignore",
+        message=".*attribute.*was provided to the.*Field.*function.*",
+        category=UserWarning,
+    )
+    # Also suppress all warnings from Pydantic's schema generation module
+    warnings.filterwarnings(
+        "ignore",
+        category=UserWarning,
+        module="pydantic._internal._generate_schema",
+    )
+
+
+# Call it before importing modules that might trigger the warning
+suppress_pydantic_warnings()
 
 from src.api import DattaBotAPI
 from src.api_interface import DattaBotAPIResponse
@@ -116,13 +136,6 @@ def main():
         nargs="?",
         help="Optional. Optional string arguments that can be used for the api command.",
     )
-    # TODO: Check if help is specified.
-    # if parser...:
-    #     print(
-    #         "Please set `--api_cmd <API command name>` when calling this script. It is required."
-    #     )
-    #     parser.print_help()
-    #     return
     args = parser.parse_args()
     return process_api_cmd(api_cmd=args.api_cmd, api_args_str=args.api_args)
 

@@ -35,7 +35,8 @@ agent:
     validation_save_weights_every_x_batches: 100
     validation_no_save_weights_every_x_batches: 10
     num_batches_train_every_epoch: 64
-    num_batches_val_every_epoch: 10
+    num_batches_val_every_epoch: 16
+    fsdp: true
 inference:
     max_new_tokens: 512
     temperature: 1.0

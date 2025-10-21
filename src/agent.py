@@ -27,6 +27,7 @@ from src.util import (
 )
 
 from torch import nn, Tensor
+from torch.distributed.fsdp import FSDPModule, fully_shard, MixedPrecisionPolicy
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
 from torch.utils.data.distributed import DistributedSampler
 
@@ -48,12 +49,15 @@ class Agent:
         self.data_dir = self.config.agent.data_directory
         self.plot_dir = self.config.agent.plot_directory
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
+        self.autocast_dtype = torch.bfloat16
         # Setup hardware settings.
         self.agent_device = self.config.env.device
         self._setup_cpu_gpu_settings()
         # Setup multi-gpu settings.
         if dist.is_available() and torch.cuda.device_count() > 1:
             self._setup_distributed()
+        # Setup device.
+        self.agent_device = torch.device(self.agent_device)
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
         self.comm_manager = DattaBotCommunicationManager()
@@ -77,7 +81,7 @@ class Agent:
             cutoffs=[10_000, 50_000, self.tokenizer.vocab_size - 1],
             div_value=4.0,
             head_bias=False,
-        ).to(self.agent_device)
+        ).to(self.agent_device, dtype=self.autocast_dtype)
         # Setup training objects.
         self.train_batch_idx = 0
         self.val_batch_idx = 0
@@ -97,7 +101,28 @@ class Agent:
         self.logger.info(
             f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
         )
-        # TODO(PiyushDatta): Try and get Shampoo optimizer to work.
+        # Wrap with distributed layer if we have multiple gpus.
+        if dist.is_available() and torch.cuda.device_count() > 1:
+            if self.config.agent.fsdp:
+                fsdp_kwargs = {
+                    "mp_policy": MixedPrecisionPolicy(
+                        param_dtype=self.autocast_dtype,
+                        reduce_dtype=self.autocast_dtype,
+                    )
+                }
+                for layer in self.model.layers:
+                    fully_shard(layer, **fsdp_kwargs)
+                fully_shard(self.model, **fsdp_kwargs)
+                assert isinstance(self.model, FSDPModule)
+            else:
+                self.model = nn.parallel.DistributedDataParallel(
+                    self.model,
+                    device_ids=[self.local_rank],
+                    output_device=self.local_rank,
+                    find_unused_parameters=False,
+                )
+        self.model.cuda()
+        # TODO(PiyushDatta): Try and get Muon optimizer to work.
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
@@ -121,15 +146,8 @@ class Agent:
             loss_fn=self.loss_fn,
             optimizer=self.optimizer,
         )
-        # Wrap with distributed layer if we have multiple gpus.
-        if dist.is_available() and torch.cuda.device_count() > 1:
-            self.model = nn.parallel.DistributedDataParallel(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-                find_unused_parameters=False,
-            )
-        self.model.cuda()
+        # Ensure loss_fn has correct dtype after loading checkpoint
+        self.loss_fn = self.loss_fn.to(dtype=self.autocast_dtype)
         # Setup inference engine when needed.
         self.inference_engine = None
         self.use_moe = self.config.neural_net.use_moe
@@ -149,6 +167,7 @@ class Agent:
         """Helper method to save agent."""
         save_agent(
             model=self.model,
+            device=self.agent_device,
             filename=self.weights_fname,
             loss_fn=self.loss_fn,
             optimizer=self.optimizer,
@@ -214,15 +233,20 @@ class Agent:
             targets_flat = targets_flat[mask_flat]
         outputs_flat = outputs_flat.to(self.agent_device)
         targets_flat = targets_flat.to(self.agent_device)
-        # Main cross-entropy loss
+        # Cast to float32 for loss.
+        outputs_flat = outputs_flat.float()
+        # Main cross-entropy loss.
         loss_output = self.loss_fn(outputs_flat, targets_flat)
         main_loss = loss_output.loss
-        # MoE auxiliary loss (only during training)
+        # MoE auxiliary loss (only during training).
         moe_loss = None
         if self.training and self.use_moe:
             if isinstance(
                 self.model,
-                (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel),
+                (
+                    torch.nn.DataParallel,
+                    torch.nn.parallel.DistributedDataParallel,
+                ),
             ):
                 moe_loss = self.model.module.get_load_balancing_loss()
             else:
@@ -384,10 +408,9 @@ class Agent:
             )
             for epoch in range(self.config.agent.max_training_num_epochs):
                 curr_epoch_num = epoch + 1
-                if is_rank_0():
-                    self.logger.debug(
-                        f"\nEpoch {curr_epoch_num}/{self.config.agent.max_training_num_epochs}"
-                    )
+                self.logger.debug(
+                    f"\nEpoch {curr_epoch_num}/{self.config.agent.max_training_num_epochs}"
+                )
                 # Tell DistributedSampler to shuffle differently this epoch.
                 if isinstance(train_dataloader.sampler, DistributedSampler):
                     train_dataloader.sampler.set_epoch(curr_epoch_num)
@@ -409,11 +432,10 @@ class Agent:
                 response.num_train_tokens_processed += train_tokens_in_epoch
                 response.num_train_batches += train_steps_this_epoch
                 elapsed = time.time() - train_start_time
-                if is_rank_0():
-                    self.logger.debug(
-                        f"[Epoch {curr_epoch_num}] avg_train_loss={avg_train_loss:.4f}, "
-                        f"tokens_processed={tokens_processed:,}"
-                    )
+                self.logger.debug(
+                    f"[Epoch {curr_epoch_num}] avg_train_loss={avg_train_loss:.4f}, "
+                    f"tokens_processed={tokens_processed:,}"
+                )
                 # Stop conditions
                 if max_train_tokens != -1 and tokens_processed >= max_train_tokens:
                     self.logger.info(
@@ -436,10 +458,10 @@ class Agent:
                 tokens_processed += val_tokens_in_epoch
                 response.num_val_tokens_processed += val_tokens_in_epoch
                 response.num_val_batches += val_steps_this_epoch
+                self.logger.debug(
+                    f"[Epoch {curr_epoch_num}] avg_val_loss={avg_val_loss:.4f}"
+                )
                 if is_rank_0():
-                    self.logger.debug(
-                        f"[Epoch {curr_epoch_num}] avg_val_loss={avg_val_loss:.4f}"
-                    )
                     # Log epoch metrics to MetricTracker
                     self.metric_tracker.log_metrics(
                         {
@@ -452,17 +474,15 @@ class Agent:
                 # Save best model.
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
-                    if is_rank_0():
-                        self._save_agent()
-                        self.logger.info("New best model saved!")
+                    self._save_agent()
+                    self.logger.info("New best model saved!")
                     self.logger.info(f"Best validation loss: {avg_val_loss:.2f}\n")
                 # Periodic checkpoint.
-                if is_rank_0() and total_steps % ckpt_interval == 0:
-                    if is_rank_0():
-                        self._save_agent()
-                        self.logger.info(
-                            f"New model saved since total_steps ({total_steps}) has hit ckpt_interval ({ckpt_interval})."
-                        )
+                if total_steps % ckpt_interval == 0:
+                    self._save_agent()
+                    self.logger.info(
+                        f"New model saved since total_steps ({total_steps}) has hit ckpt_interval ({ckpt_interval})."
+                    )
             # Done training!
             if self.metric_tracker.active:
                 response.text = (
@@ -491,8 +511,7 @@ class Agent:
             self.end_training_session()
         finally:
             # Always save the final model.
-            if is_rank_0():
-                self._save_agent()
+            self._save_agent()
         # Log the training details, including the time taken to train.
         train_end_time = time.time()
         total_training_time = train_end_time - train_start_time
@@ -538,11 +557,16 @@ class Agent:
         )
         # Setup progress bar
         progress_bar = tqdm.tqdm(
-            range(num_batches), desc=f"Training for epoch {epoch_num}", leave=True
+            enumerate(dataloader),
+            total=num_batches,
+            desc=f"Training for epoch {epoch_num}",
+            leave=True,
+            disable=not is_rank_0(),
         )
         # Go through all the batches.
-        for _ in progress_bar:
-            batch = next(dataloader)
+        for batch_idx, batch in progress_bar:
+            if batch_idx >= num_batches:
+                break
             # input_ids: [batch, seq_len]
             input_ids = batch[0].to(self.agent_device)
             labels = batch[1].to(self.agent_device)
@@ -551,9 +575,9 @@ class Agent:
             # Zero the gradients.
             self.optimizer.zero_grad()
             with torch.autocast(
-                device_type=self.agent_device,
-                enabled=(not is_device_cpu(self.agent_device)),
-                dtype=torch.bfloat16,
+                device_type=self.agent_device.type,
+                enabled=(not is_device_cpu(str(self.agent_device))),
+                dtype=self.autocast_dtype,
             ):
                 # Forward pass.
                 logits = self.model(
@@ -685,22 +709,26 @@ class Agent:
         total_tokens = 0
         # Setup progress bar
         progress_bar = tqdm.tqdm(
-            range(num_batches), desc=f"Validating for epoch {epoch_num}", leave=True
+            enumerate(dataloader),
+            total=num_batches,
+            desc=f"Validating for epoch {epoch_num}",
+            leave=True,
+            disable=not is_rank_0(),
         )
-        # Go through all the batches.
         # Disable gradient calculations and go through all the batches.
         with torch.no_grad():
-            for _ in progress_bar:
-                batch = next(dataloader)
+            for batch_idx, batch in progress_bar:
+                if batch_idx >= num_batches:
+                    break
                 input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
                     self.agent_device
                 )
                 batch_size = input_ids.shape[0]
                 attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
                 with torch.autocast(
-                    device_type=self.agent_device,
-                    enabled=(not is_device_cpu(self.agent_device)),
-                    dtype=torch.bfloat16,
+                    device_type=self.agent_device.type,
+                    enabled=(not is_device_cpu(str(self.agent_device))),
+                    dtype=self.autocast_dtype,
                 ):
                     # Forward pass.
                     logits = self.model(
@@ -767,9 +795,8 @@ class Agent:
         return avg_loss, total_steps, total_tokens
 
     def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
-        if is_rank_0():
-            self.logger.info(f"Processing queries: {queries}")
-            self.logger.info(f"Queries length: {len(queries)}")
+        self.logger.info(f"Processing queries: {queries}")
+        self.logger.info(f"Queries length: {len(queries)}")
         # Call the inference engine.
         if self.inference_engine is None:
             self._setup_inference_engine()

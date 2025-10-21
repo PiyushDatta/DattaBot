@@ -138,7 +138,7 @@ def run_tests(test_mode: str = "unit", test_file: Optional[str] = None):
         command.extend(["-m", ""])
     else:
         raise ValueError(
-            f"Unknown test mode: {test_mode}. Use 'unit', 'integration', or 'all'"
+            f"Unknown test mode: {test_mode}. Use 'unit', 'integration', '--test-file', or 'all'"
         )
 
     env = os.environ.copy()

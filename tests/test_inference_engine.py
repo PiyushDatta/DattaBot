@@ -49,37 +49,21 @@ def mock_model(mock_config):
 
 @pytest.fixture
 def mock_adaptive_softmax(mock_config):
-    """Create a mock adaptive softmax."""
+    """Create a REAL adaptive softmax (not a mock) for testing."""
     vocab_size = 1000
     d_model = mock_config.neural_net.model_dimensions
-
-    # Create mock adaptive softmax
-    mock_softmax = Mock(spec=nn.AdaptiveLogSoftmaxWithLoss)
-
-    cutoffs = [500, 1000]
-    # 1 tail cluster
-    n_clusters = len(cutoffs) - 1
-
-    # Mock head: includes both head tokens AND cluster assignment logits
-    # Shape: [cutoffs[0] + n_clusters, d_model] = [500 + 1, 128]
-    mock_head = Mock()
-    mock_head.weight = torch.randn(cutoffs[0] + n_clusters, d_model)
-    mock_head.bias = torch.randn(cutoffs[0] + n_clusters)
-    mock_softmax.head = mock_head
-
-    # Mock cutoffs
-    mock_softmax.cutoffs = cutoffs
-
-    # Mock tail clusters - one Sequential module per tail cluster
-    # Each tail projects to the tokens in that cluster
-    tail_size = cutoffs[1] - cutoffs[0]  # 500 tokens in tail
-
-    mock_tail = nn.Sequential(
-        nn.Linear(d_model, d_model // 2), nn.Linear(d_model // 2, tail_size)
+    # Create a REAL AdaptiveLogSoftmaxWithLoss, not a mock
+    # This ensures all the weights are real tensors that support matrix operations
+    adaptive_softmax = nn.AdaptiveLogSoftmaxWithLoss(
+        in_features=d_model,
+        n_classes=vocab_size,
+        cutoffs=[500, vocab_size - 1],  # One tail cluster
+        div_value=4.0,
+        head_bias=True,
     )
-    mock_softmax.tail = [mock_tail]
-
-    return mock_softmax
+    # The inference engine uses autocast with bfloat16, so adaptive_softmax must match
+    adaptive_softmax = adaptive_softmax.to(dtype=torch.bfloat16)
+    return adaptive_softmax
 
 
 @pytest.fixture
@@ -113,7 +97,7 @@ class TestDattaBotInferenceEngine:
 
     def test_initialization(self, inference_engine):
         """Test inference engine initializes correctly."""
-        assert inference_engine.device == "cpu"
+        assert inference_engine.device.type == "cpu"
         assert inference_engine.vocab_size == 1000
         assert inference_engine.adaptive_softmax is not None
         assert inference_engine.agent_config.inference.max_new_tokens == 20
