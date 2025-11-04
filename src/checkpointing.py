@@ -272,26 +272,24 @@ def _clean_state_dict_keys(
 def _atomic_save(checkpoint: Dict[str, Any], filepath: str) -> None:
     """
     Atomically save checkpoint to disk.
-
     Uses temporary file + atomic rename to prevent corruption.
     """
     logger = get_logger()
     filepath = Path(filepath)
     temp_filepath = filepath.parent / f".tmp_{filepath.name}.{os.getpid()}"
-
     try:
         # Save to temporary file
         torch.save(checkpoint, temp_filepath)
-
         # Atomic rename
         shutil.move(str(temp_filepath), str(filepath))
-
         logger.debug(f"Atomically saved checkpoint to {filepath}")
-
     except Exception as e:
         # Clean up temp file on error
         if temp_filepath.exists():
             temp_filepath.unlink()
+        logger.error(
+            f"Error file saving checkpoint to {filepath}, used tmp file: {temp_filepath}"
+        )
         raise
     finally:
         # Double-check cleanup
@@ -372,12 +370,10 @@ def save_agent(
     """
     logger = get_logger()
     logger.info(f"Saving checkpoint to {filename}")
-
     try:
         # Extract state dicts (all ranks participate for FSDP)
         model_state = _extract_model_state(model, device)
         optimizer_state = _extract_optimizer_state(model, optimizer, device)
-
         # Only rank 0 saves to disk
         if _should_save_on_this_rank():
             components = CheckpointComponents(
@@ -386,11 +382,9 @@ def save_agent(
                 loss_fn_state=loss_fn.state_dict() if loss_fn else None,
                 metadata=metadata,
             )
-
             checkpoint = _create_checkpoint_dict(components)
             _atomic_save(checkpoint, filename)
             _log_checkpoint_components(components, "saved", filename)
-
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {repr(e)}\n{traceback.format_exc()}")
         raise

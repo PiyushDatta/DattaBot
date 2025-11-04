@@ -1,11 +1,111 @@
-import argparse
+import atexit
 import os
+import signal
 import subprocess
 import sys
 from typing import Optional
 
-from cli_parser import create_parser, EvalBenchmark
+from cli_parser import create_parser
 from src.util import APIActions
+
+# Global list to track spawned processes
+_spawned_processes: list[subprocess.Popen] = []
+
+
+def cleanup_gpu_processes():
+    """Kill all GPU processes and spawned subprocesses."""
+    print("\nCleaning up GPU processes...")
+    # First, kill our spawned subprocesses.
+    for proc in _spawned_processes:
+        try:
+            if proc.poll() is None:
+                # Process is still running
+                print(f"Terminating spawned process {proc.pid}...")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print(f"Force killing process {proc.pid}...")
+                    proc.kill()
+        except Exception as e:
+            print(f"Error terminating process: {e}")
+    # Then, kill any remaining GPU processes.
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        pids = [
+            int(pid.strip()) for pid in result.stdout.strip().split("\n") if pid.strip()
+        ]
+        if pids:
+            print(f"Found {len(pids)} GPU processes to clean up...")
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    print(f"Killed GPU process {pid}")
+                except (ProcessLookupError, PermissionError) as e:
+                    print(f"Could not kill process {pid}: {e}")
+        else:
+            print("No GPU processes found")
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ):
+        print("Could not query nvidia-smi for GPU processes")
+    print("Cleanup complete!")
+
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C and other termination signals."""
+    print("\n\nReceived interrupt signal, cleaning up...")
+    cleanup_gpu_processes()
+    sys.exit(0)
+
+
+def register_cleanup_handlers():
+    """Register signal handlers and atexit cleanup."""
+    # Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+    # Termination signal
+    signal.signal(signal.SIGTERM, signal_handler)
+    # Normal exit
+    atexit.register(cleanup_gpu_processes)
+
+
+def run_subprocess(cmd: list[str], check: bool = True):
+    """
+    Run a subprocess and track it for cleanup.
+
+    Args:
+        cmd: Command to run as list of strings
+        check: Whether to check return code (passed to subprocess.run)
+    """
+    global _spawned_processes
+
+    print("Running command:", " ".join(cmd))
+
+    # Use Popen instead of run to get the process object immediately
+    proc = subprocess.Popen(cmd)
+    _spawned_processes.append(proc)
+
+    try:
+        returncode = proc.wait()
+        if check and returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd)
+    except KeyboardInterrupt:
+        # Let the signal handler deal with it
+        raise
+    finally:
+        # Remove from tracking list when done
+        if proc in _spawned_processes:
+            _spawned_processes.remove(proc)
+    return returncode
 
 
 def detect_num_gpus() -> int:
@@ -71,8 +171,7 @@ def process_api_cmd(api_cmd: str, api_args: str):
         print("No GPUs detected, running client normally on CPU.")
         cmd = [sys.executable, "client.py"]
 
-    print("Running command:", " ".join(cmd))
-    subprocess.run(cmd)
+    run_subprocess(cmd, check=False)
 
 
 def run_client():
@@ -102,8 +201,7 @@ def run_client():
         print("No GPUs detected, running client on CPU.")
         cmd = [sys.executable, "client.py"]
 
-    print("Running command:", " ".join(cmd))
-    subprocess.run(cmd)
+    run_subprocess(cmd, check=False)
 
 
 def run_tests(test_mode: str = "unit", test_file: Optional[str] = None):
@@ -154,14 +252,24 @@ def run_tests(test_mode: str = "unit", test_file: Optional[str] = None):
 
     print(f"Running command: {' '.join(command)}")
     try:
-        result = subprocess.run(command, check=True, env=env)
-        print(f"\nTests passed!")
+        # For tests, we still use subprocess.run since we want to capture the result.
+        proc = subprocess.Popen(command, env=env)
+        _spawned_processes.append(proc)
+        returncode = proc.wait()
+        _spawned_processes.remove(proc)
+        if returncode != 0:
+            print(f"\nTests failed with exit code {returncode}")
+            sys.exit(returncode)
+        else:
+            print("\nTests passed!")
     except subprocess.CalledProcessError as e:
         print(f"\nTests failed with exit code {e.returncode}")
         sys.exit(e.returncode)
 
 
 def main():
+    # Register cleanup handlers at the start.
+    register_cleanup_handlers()
     parser = create_parser()
     args = parser.parse_args()
     try:

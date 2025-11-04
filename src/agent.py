@@ -1,3 +1,4 @@
+import os
 import time
 import traceback
 from math import ceil
@@ -137,8 +138,11 @@ class Agent:
             pct_start=0.3,
             anneal_strategy="cos",
         )
-        # Load model weights
+        # Validate weights file path and load model weights.
         self.weights_fname = self.config.agent.weights_file_name
+        weights_dir = os.path.dirname(self.weights_fname)
+        if weights_dir and not os.path.exists(weights_dir):
+            raise FileNotFoundError(f"Weights path does not exist: {weights_dir}")
         load_agent(
             model=self.model,
             filepath=self.weights_fname,
