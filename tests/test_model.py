@@ -8,7 +8,7 @@ from src.util import is_device_cpu
 
 @pytest.mark.parametrize("batch_size,seq_len", [(2, 4), (3, 8)])
 def test_decoder_only_forward(batch_size, seq_len):
-    model = DattaBotModel()
+    model = DattaBotModel(device=torch.device("cpu"))
     model.eval()
     tokenizer = get_tokenizer()
     d_model = model.d_model
@@ -27,7 +27,7 @@ def test_decoder_only_forward(batch_size, seq_len):
 
     # Foward pass.
     with torch.autocast(
-        device_type=model.device,
+        device_type=model.device.type,
         enabled=True,
         dtype=torch.bfloat16,
     ):

@@ -501,7 +501,7 @@ def load_agent(
     model: DattaBotModel,
     checkpoint_dir: str,
     optimizer: torch.optim.Optimizer,
-    device: str,
+    device: torch.device,
     strict: bool = True,
     loss_fn: Optional[nn.AdaptiveLogSoftmaxWithLoss] = None,
 ) -> Dict[str, Any]:

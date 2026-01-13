@@ -816,7 +816,7 @@ class TestFullSaveLoadCycle:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert loaded_metadata == metadata
@@ -878,7 +878,7 @@ class TestFullSaveLoadCycle:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
             loss_fn=new_loss_fn,
         )
 
@@ -922,7 +922,7 @@ class TestFullSaveLoadCycle:
             model=simple_model,
             checkpoint_dir="/nonexistent/path",
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert metadata == {}
@@ -995,7 +995,7 @@ class TestErrorHandling:
                 model=simple_model,
                 checkpoint_dir=checkpoint_dir,
                 optimizer=simple_optimizer,
-                device="cpu",
+                device=torch.device("cpu"),
             )
 
         mock_logger.error.assert_called()
@@ -1037,7 +1037,7 @@ class TestErrorHandling:
                 model=different_model,
                 checkpoint_dir=checkpoint_dir,
                 optimizer=different_optimizer,
-                device="cpu",
+                device=torch.device("cpu"),
                 strict=True,
             )
 
@@ -1081,7 +1081,7 @@ class TestModulePrefixHandling:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         # Should log that it's removing prefixes
@@ -1145,7 +1145,7 @@ class TestPerformance:
             model=new_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=new_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         # Verify weights match
@@ -1187,7 +1187,7 @@ class TestPerformance:
                 model=simple_model,
                 checkpoint_dir=checkpoint_dir,
                 optimizer=simple_optimizer,
-                device="cpu",
+                device=torch.device("cpu"),
             )
 
             assert metadata["cycle"] == i
@@ -1227,7 +1227,7 @@ class TestEdgeCases:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert metadata == {}
@@ -1269,7 +1269,7 @@ class TestEdgeCases:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert loaded_metadata["epoch"] == 42
@@ -1310,7 +1310,7 @@ class TestEdgeCases:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
             loss_fn=loss_fn,
         )
 
@@ -1352,7 +1352,7 @@ class TestEdgeCases:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert metadata == {"epoch": 1}
@@ -1387,7 +1387,7 @@ class TestEdgeCases:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert metadata == {}
@@ -1435,7 +1435,7 @@ class TestEdgeCases:
             model=simple_model,
             checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
-            device="cpu",
+            device=torch.device("cpu"),
         )
 
         assert metadata["version"] == 2
