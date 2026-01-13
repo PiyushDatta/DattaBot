@@ -40,7 +40,11 @@ For manual: Use `--help`, like so: `python run.py --help`
 
 `python run.py --test integration`
 
-# Hwo to run all tests (unit + integration)
+# How to run a specific unit test with integration
+
+`python run.py --test integration --test-file test_model.py`
+
+# How to run all tests (unit + integration)
 
 `python run.py --test all`
 

@@ -1,27 +1,33 @@
+import json
 import os
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import call, MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-
 from src.checkpointing import (
-    _atomic_save,
+    _atomic_save_json,
+    _atomic_save_pt,
+    _atomic_save_safetensors,
+    _checkpoint_exists,
     _clean_state_dict_keys,
-    _create_checkpoint_dict,
+    _ensure_directory,
     _extract_model_state,
     _extract_optimizer_state,
+    _flatten_state_dict,
+    _get_checkpoint_paths,
     _get_fsdp_state_dict_options,
     _is_fsdp_model,
+    _load_json,
     _load_model_state,
     _load_optimizer_state,
     _log_checkpoint_components,
-    _parse_checkpoint_dict,
+    _make_json_serializable,
     _should_save_on_this_rank,
     _unwrap_model,
     CheckpointComponents,
@@ -129,6 +135,185 @@ class TestFSDPDetection:
 
 
 # ============================================================================
+# Unit Tests - Path Management
+# ============================================================================
+
+
+class TestPathManagement:
+    """Test checkpoint path management."""
+
+    def test_get_checkpoint_paths(self, temp_dir):
+        """Test getting checkpoint component paths."""
+        base_path = Path(temp_dir)
+        paths = _get_checkpoint_paths(base_path)
+
+        assert paths["model"] == base_path / "model.safetensors"
+        assert paths["optimizer"] == base_path / "optimizer.pt"
+        assert paths["loss_fn"] == base_path / "loss_fn.pt"
+        assert paths["metadata"] == base_path / "metadata.json"
+
+    def test_ensure_directory_creates_new(self, temp_dir):
+        """Test creating a new directory."""
+        new_dir = Path(temp_dir) / "new_checkpoint_dir"
+        assert not new_dir.exists()
+
+        _ensure_directory(new_dir)
+
+        assert new_dir.exists()
+        assert new_dir.is_dir()
+
+    def test_ensure_directory_existing(self, temp_dir):
+        """Test that existing directory is handled gracefully."""
+        existing_dir = Path(temp_dir)
+        assert existing_dir.exists()
+
+        # Should not raise
+        _ensure_directory(existing_dir)
+        assert existing_dir.exists()
+
+    def test_ensure_directory_nested(self, temp_dir):
+        """Test creating nested directories."""
+        nested_dir = Path(temp_dir) / "a" / "b" / "c"
+        assert not nested_dir.exists()
+
+        _ensure_directory(nested_dir)
+
+        assert nested_dir.exists()
+
+    def test_checkpoint_exists_true(self, temp_dir):
+        """Test checkpoint exists when model file present."""
+        checkpoint_dir = Path(temp_dir)
+        model_path = checkpoint_dir / "model.safetensors"
+
+        # Create empty model file
+        model_path.touch()
+
+        assert _checkpoint_exists(checkpoint_dir) is True
+
+    def test_checkpoint_exists_false(self, temp_dir):
+        """Test checkpoint does not exist when model file missing."""
+        checkpoint_dir = Path(temp_dir)
+
+        assert _checkpoint_exists(checkpoint_dir) is False
+
+
+# ============================================================================
+# Unit Tests - SafeTensors Utilities
+# ============================================================================
+
+
+class TestSafeTensorsUtilities:
+    """Test safetensors utility functions."""
+
+    def test_flatten_state_dict_simple(self):
+        """Test flattening a simple state dict."""
+        state_dict = {
+            "weight": torch.randn(5, 5),
+            "bias": torch.randn(5),
+        }
+        flat = _flatten_state_dict(state_dict)
+
+        assert "weight" in flat
+        assert "bias" in flat
+        assert len(flat) == 2
+
+    def test_flatten_state_dict_nested(self):
+        """Test flattening a nested state dict."""
+        state_dict = {
+            "layer1": {
+                "weight": torch.randn(5, 5),
+                "bias": torch.randn(5),
+            },
+            "layer2": {
+                "weight": torch.randn(3, 3),
+            },
+        }
+        flat = _flatten_state_dict(state_dict)
+
+        assert "layer1.weight" in flat
+        assert "layer1.bias" in flat
+        assert "layer2.weight" in flat
+        assert len(flat) == 3
+
+    def test_flatten_state_dict_deeply_nested(self):
+        """Test flattening a deeply nested state dict."""
+        state_dict = {
+            "encoder": {
+                "layers": {
+                    "0": {
+                        "weight": torch.randn(5, 5),
+                    },
+                },
+            },
+        }
+        flat = _flatten_state_dict(state_dict)
+
+        assert "encoder.layers.0.weight" in flat
+        assert len(flat) == 1
+
+    def test_flatten_state_dict_with_prefix(self):
+        """Test flattening with a prefix."""
+        state_dict = {
+            "weight": torch.randn(5, 5),
+        }
+        flat = _flatten_state_dict(state_dict, prefix="model.")
+
+        assert "model.weight" in flat
+
+
+# ============================================================================
+# Unit Tests - JSON Serialization
+# ============================================================================
+
+
+class TestJSONSerialization:
+    """Test JSON serialization utilities."""
+
+    def test_make_json_serializable_dict(self):
+        """Test serializing a dictionary."""
+        data = {"key": "value", "number": 42}
+        result = _make_json_serializable(data)
+
+        assert result == data
+
+    def test_make_json_serializable_tensor(self):
+        """Test serializing a tensor."""
+        tensor = torch.tensor([1, 2, 3])
+        result = _make_json_serializable(tensor)
+
+        assert result == [1, 2, 3]
+
+    def test_make_json_serializable_dtype(self):
+        """Test serializing a torch dtype."""
+        dtype = torch.float32
+        result = _make_json_serializable(dtype)
+
+        assert result == "torch.float32"
+
+    def test_make_json_serializable_nested(self):
+        """Test serializing nested structure."""
+        data = {
+            "tensor": torch.tensor([1.0, 2.0]),
+            "nested": {
+                "dtype": torch.float16,
+                "list": [torch.tensor(5)],
+            },
+        }
+        result = _make_json_serializable(data)
+
+        assert result["tensor"] == [1.0, 2.0]
+        assert result["nested"]["dtype"] == "torch.float16"
+        assert result["nested"]["list"] == [5]
+
+    def test_make_json_serializable_tuple(self):
+        """Test serializing a tuple."""
+        data = (1, 2, torch.tensor(3))
+        result = _make_json_serializable(data)
+
+        assert result == [1, 2, 3]
+
+
+# ============================================================================
 # Unit Tests - State Dict Key Cleaning
 # ============================================================================
 
@@ -205,56 +390,6 @@ class TestStateDictCleaning:
 
         assert "module.layer1.weight" in cleaned
         mock_logger.info.assert_called_once()
-
-
-# ============================================================================
-# Unit Tests - Checkpoint Structure
-# ============================================================================
-
-
-class TestCheckpointStructure:
-    """Test checkpoint dictionary creation and parsing."""
-
-    def test_create_checkpoint_dict_full(self, checkpoint_components):
-        """Test creating full checkpoint with all components."""
-        checkpoint = _create_checkpoint_dict(checkpoint_components)
-
-        assert "model_state_dict" in checkpoint
-        assert "optimizer_state_dict" in checkpoint
-        assert "loss_fn_state_dict" in checkpoint
-        assert "metadata" in checkpoint
-        assert checkpoint["metadata"]["epoch"] == 42
-
-    def test_create_checkpoint_dict_minimal(self):
-        """Test creating checkpoint with only required components."""
-        components = CheckpointComponents(model_state={"weight": torch.randn(5, 5)})
-        checkpoint = _create_checkpoint_dict(components)
-
-        assert "model_state_dict" in checkpoint
-        assert "metadata" in checkpoint
-        assert "optimizer_state_dict" not in checkpoint
-        assert "loss_fn_state_dict" not in checkpoint
-
-    def test_parse_checkpoint_dict_new_format(self, checkpoint_components):
-        """Test parsing new structured checkpoint format."""
-        checkpoint = _create_checkpoint_dict(checkpoint_components)
-        parsed = _parse_checkpoint_dict(checkpoint)
-
-        assert parsed.model_state is not None
-        assert parsed.optimizer_state is not None
-        assert parsed.loss_fn_state is not None
-        assert parsed.metadata["epoch"] == 42
-
-    def test_parse_checkpoint_dict_legacy_format(self, mock_logger):
-        """Test parsing legacy checkpoint format."""
-        legacy_checkpoint = {"layer.weight": torch.randn(5, 5)}
-        parsed = _parse_checkpoint_dict(legacy_checkpoint)
-
-        assert parsed.model_state == legacy_checkpoint
-        assert parsed.optimizer_state is None
-        assert parsed.loss_fn_state is None
-        assert parsed.metadata == {}
-        mock_logger.warning.assert_called_once()
 
 
 # ============================================================================
@@ -335,48 +470,152 @@ class TestRankDetection:
 # ============================================================================
 
 
-class TestAtomicSave:
-    """Test atomic save operations."""
+class TestAtomicSaveSafetensors:
+    """Test atomic safetensors save operations."""
 
-    def test_atomic_save_success(self, temp_dir, mock_logger):
-        """Test successful atomic save."""
-        filepath = os.path.join(temp_dir, "checkpoint.pt")
-        checkpoint = {"data": torch.randn(5, 5)}
+    def test_atomic_save_safetensors_success(self, temp_dir, mock_logger):
+        """Test successful atomic safetensors save."""
+        filepath = Path(temp_dir) / "model.safetensors"
+        state_dict = {"weight": torch.randn(5, 5), "bias": torch.randn(5)}
 
-        _atomic_save(checkpoint, filepath)
+        _atomic_save_safetensors(state_dict, filepath)
 
-        assert os.path.exists(filepath)
-        loaded = torch.load(filepath)
-        assert "data" in loaded
+        assert filepath.exists()
         mock_logger.debug.assert_called()
 
-    def test_atomic_save_cleanup_on_error(self, temp_dir, mock_logger):
+    def test_atomic_save_safetensors_nested(self, temp_dir, mock_logger):
+        """Test saving nested state dict as safetensors."""
+        filepath = Path(temp_dir) / "model.safetensors"
+        state_dict = {
+            "layer1": {
+                "weight": torch.randn(5, 5),
+            },
+        }
+
+        _atomic_save_safetensors(state_dict, filepath)
+
+        assert filepath.exists()
+
+    def test_atomic_save_safetensors_cleanup_on_error(self, temp_dir, mock_logger):
         """Test that temp file is cleaned up on error."""
-        filepath = os.path.join(temp_dir, "checkpoint.pt")
-        checkpoint = {"data": "invalid"}  # Will cause error when trying to move
+        filepath = Path(temp_dir) / "model.safetensors"
 
         with patch(
-            "src.checkpointing.torch.save", side_effect=RuntimeError("Save failed")
+            "src.checkpointing.save_safetensors",
+            side_effect=RuntimeError("Save failed"),
         ):
             with pytest.raises(RuntimeError):
-                _atomic_save(checkpoint, filepath)
+                _atomic_save_safetensors({"weight": torch.randn(5, 5)}, filepath)
 
         # Check no temp files left behind
         temp_files = [f for f in os.listdir(temp_dir) if f.startswith(".tmp_")]
         assert len(temp_files) == 0
 
-    def test_atomic_save_no_collision(self, temp_dir, mock_logger):
-        """Test that temp filenames don't collide (use PID)."""
-        filepath = os.path.join(temp_dir, "checkpoint.pt")
-        checkpoint1 = {"data": torch.randn(5, 5)}
-        checkpoint2 = {"data": torch.randn(3, 3)}
 
-        # Save twice to ensure no collision
-        _atomic_save(checkpoint1, filepath)
-        _atomic_save(checkpoint2, filepath)
+class TestAtomicSavePt:
+    """Test atomic PyTorch save operations."""
 
-        # Should overwrite cleanly
-        assert os.path.exists(filepath)
+    def test_atomic_save_pt_success(self, temp_dir, mock_logger):
+        """Test successful atomic .pt save."""
+        filepath = Path(temp_dir) / "optimizer.pt"
+        state_dict = {"state": {}, "param_groups": [{"lr": 0.001}]}
+
+        _atomic_save_pt(state_dict, filepath)
+
+        assert filepath.exists()
+        loaded = torch.load(filepath)
+        assert loaded["param_groups"][0]["lr"] == 0.001
+        mock_logger.debug.assert_called()
+
+    def test_atomic_save_pt_cleanup_on_error(self, temp_dir, mock_logger):
+        """Test that temp file is cleaned up on error."""
+        filepath = Path(temp_dir) / "optimizer.pt"
+
+        with patch(
+            "src.checkpointing.torch.save",
+            side_effect=RuntimeError("Save failed"),
+        ):
+            with pytest.raises(RuntimeError):
+                _atomic_save_pt({"data": "test"}, filepath)
+
+        temp_files = [f for f in os.listdir(temp_dir) if f.startswith(".tmp_")]
+        assert len(temp_files) == 0
+
+
+class TestAtomicSaveJson:
+    """Test atomic JSON save operations."""
+
+    def test_atomic_save_json_success(self, temp_dir, mock_logger):
+        """Test successful atomic JSON save."""
+        filepath = Path(temp_dir) / "metadata.json"
+        data = {"epoch": 42, "loss": 0.5}
+
+        _atomic_save_json(data, filepath)
+
+        assert filepath.exists()
+        with open(filepath, "r") as f:
+            loaded = json.load(f)
+        assert loaded["epoch"] == 42
+        mock_logger.debug.assert_called()
+
+    def test_atomic_save_json_with_tensors(self, temp_dir, mock_logger):
+        """Test saving JSON with tensor values (should be serialized)."""
+        filepath = Path(temp_dir) / "metadata.json"
+        data = {"tensor_val": torch.tensor([1, 2, 3]), "dtype": torch.float32}
+
+        _atomic_save_json(data, filepath)
+
+        assert filepath.exists()
+        with open(filepath, "r") as f:
+            loaded = json.load(f)
+        assert loaded["tensor_val"] == [1, 2, 3]
+        assert loaded["dtype"] == "torch.float32"
+
+    def test_atomic_save_json_cleanup_on_error(self, temp_dir, mock_logger):
+        """Test that temp file is cleaned up on error."""
+        filepath = Path(temp_dir) / "metadata.json"
+
+        # Create object that can't be serialized
+        class NonSerializable:
+            pass
+
+        with patch(
+            "src.checkpointing._make_json_serializable",
+            return_value={"bad": NonSerializable()},
+        ):
+            with pytest.raises(TypeError):
+                _atomic_save_json({"data": "test"}, filepath)
+
+        temp_files = [f for f in os.listdir(temp_dir) if f.startswith(".tmp_")]
+        assert len(temp_files) == 0
+
+
+class TestLoadJson:
+    """Test JSON loading."""
+
+    def test_load_json_success(self, temp_dir):
+        """Test loading a JSON file."""
+        filepath = Path(temp_dir) / "test.json"
+        data = {"key": "value", "number": 42}
+
+        with open(filepath, "w") as f:
+            json.dump(data, f)
+
+        loaded = _load_json(filepath)
+
+        assert loaded == data
+
+    def test_load_json_unicode(self, temp_dir):
+        """Test loading JSON with unicode content."""
+        filepath = Path(temp_dir) / "test.json"
+        data = {"message": "Hello, 世界! 🎉"}
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+        loaded = _load_json(filepath)
+
+        assert loaded["message"] == "Hello, 世界! 🎉"
 
 
 # ============================================================================
@@ -389,19 +628,22 @@ class TestLogging:
 
     def test_log_checkpoint_components_all(self, checkpoint_components, mock_logger):
         """Test logging with all components."""
-        _log_checkpoint_components(checkpoint_components, "saved", "/path/to/file.pt")
+        _log_checkpoint_components(
+            checkpoint_components, "saved", "/path/to/checkpoint"
+        )
 
         call_args = mock_logger.info.call_args[0][0]
         assert "saved" in call_args
         assert "model" in call_args
         assert "optimizer" in call_args
         assert "loss_fn" in call_args
-        assert "/path/to/file.pt" in call_args
+        assert "metadata" in call_args
+        assert "/path/to/checkpoint" in call_args
 
     def test_log_checkpoint_components_model_only(self, mock_logger):
         """Test logging with only model."""
         components = CheckpointComponents(model_state={"weight": torch.randn(5, 5)})
-        _log_checkpoint_components(components, "loaded", "/path/to/file.pt")
+        _log_checkpoint_components(components, "loaded", "/path/to/checkpoint")
 
         call_args = mock_logger.info.call_args[0][0]
         assert "loaded" in call_args
@@ -545,20 +787,23 @@ class TestFullSaveLoadCycle:
         mock_logger,
     ):
         """Test full save/load cycle with regular model."""
-        filepath = os.path.join(temp_dir, "checkpoint.pt")
+        checkpoint_dir = os.path.join(temp_dir, "checkpoint")
         device = torch.device("cpu")
         metadata = {"epoch": 10, "loss": 0.5}
 
         # Save
         save_agent(
             model=simple_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
             optimizer=simple_optimizer,
             metadata=metadata,
         )
 
-        assert os.path.exists(filepath)
+        # Verify checkpoint files exist
+        assert os.path.exists(os.path.join(checkpoint_dir, "model.safetensors"))
+        assert os.path.exists(os.path.join(checkpoint_dir, "optimizer.pt"))
+        assert os.path.exists(os.path.join(checkpoint_dir, "metadata.json"))
 
         # Modify model and optimizer
         with torch.no_grad():
@@ -569,7 +814,7 @@ class TestFullSaveLoadCycle:
         # Load
         loaded_metadata = load_agent(
             model=simple_model,
-            filepath=filepath,
+            checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
             device="cpu",
         )
@@ -599,7 +844,7 @@ class TestFullSaveLoadCycle:
         mock_logger,
     ):
         """Test save/load with AdaptiveLogSoftmax."""
-        filepath = os.path.join(temp_dir, "checkpoint_with_loss.pt")
+        checkpoint_dir = os.path.join(temp_dir, "checkpoint_with_loss")
         device = torch.device("cpu")
 
         # Create a simple loss function
@@ -612,11 +857,14 @@ class TestFullSaveLoadCycle:
         # Save
         save_agent(
             model=simple_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
             optimizer=simple_optimizer,
             loss_fn=loss_fn,
         )
+
+        # Verify loss_fn file exists
+        assert os.path.exists(os.path.join(checkpoint_dir, "loss_fn.pt"))
 
         # Create new loss function to load into
         new_loss_fn = nn.AdaptiveLogSoftmaxWithLoss(
@@ -628,7 +876,7 @@ class TestFullSaveLoadCycle:
         # Load
         load_agent(
             model=simple_model,
-            filepath=filepath,
+            checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
             device="cpu",
             loss_fn=new_loss_fn,
@@ -652,65 +900,33 @@ class TestFullSaveLoadCycle:
         mock_logger,
     ):
         """Test that non-rank-0 processes don't write files."""
-        filepath = os.path.join(temp_dir, "checkpoint_rank1.pt")
+        checkpoint_dir = os.path.join(temp_dir, "checkpoint_rank1")
         device = torch.device("cpu")
 
         save_agent(
             model=simple_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
             optimizer=simple_optimizer,
         )
 
-        # File should not be created by non-rank-0
-        assert not os.path.exists(filepath)
+        # Directory should not be created by non-rank-0
+        assert not os.path.exists(checkpoint_dir)
 
     @patch("src.checkpointing.dist_barrier")
-    def test_load_nonexistent_file(
+    def test_load_nonexistent_checkpoint(
         self, mock_barrier, simple_model, simple_optimizer, mock_logger
     ):
-        """Test loading from nonexistent file returns empty metadata."""
+        """Test loading from nonexistent checkpoint returns empty metadata."""
         metadata = load_agent(
             model=simple_model,
-            filepath="/nonexistent/path.pt",
+            checkpoint_dir="/nonexistent/path",
             optimizer=simple_optimizer,
             device="cpu",
         )
 
         assert metadata == {}
         mock_logger.error.assert_called()
-
-    @patch("src.checkpointing.dist_barrier")
-    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
-    def test_load_legacy_checkpoint_format(
-        self, mock_should_save, mock_barrier, temp_dir, simple_model, mock_logger
-    ):
-        """Test loading legacy checkpoint format (direct state dict)."""
-        filepath = os.path.join(temp_dir, "legacy_checkpoint.pt")
-
-        # Create legacy format checkpoint (direct state dict)
-        legacy_checkpoint = simple_model.state_dict()
-        torch.save(legacy_checkpoint, filepath)
-
-        # Create fresh model
-        new_model = nn.Sequential(
-            nn.Linear(10, 20),
-            nn.ReLU(),
-            nn.Linear(20, 5),
-        )
-
-        optimizer = torch.optim.Adam(new_model.parameters())
-
-        # Load should work with warning
-        metadata = load_agent(
-            model=new_model,
-            filepath=filepath,
-            optimizer=optimizer,
-            device="cpu",
-        )
-
-        assert metadata == {}
-        mock_logger.warning.assert_called()  # Should warn about legacy format
 
 
 # ============================================================================
@@ -724,10 +940,13 @@ class TestErrorHandling:
 
     @patch("src.checkpointing.dist_barrier")
     @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
-    @patch("src.checkpointing.torch.save", side_effect=RuntimeError("Disk full"))
+    @patch(
+        "src.checkpointing._atomic_save_safetensors",
+        side_effect=RuntimeError("Disk full"),
+    )
     def test_save_handles_disk_error(
         self,
-        mock_torch_save,
+        mock_safetensors_save,
         mock_should_save,
         mock_barrier,
         temp_dir,
@@ -736,13 +955,13 @@ class TestErrorHandling:
         mock_logger,
     ):
         """Test that save errors are properly caught and logged."""
-        filepath = os.path.join(temp_dir, "will_fail.pt")
+        checkpoint_dir = os.path.join(temp_dir, "will_fail")
         device = torch.device("cpu")
 
         with pytest.raises(RuntimeError):
             save_agent(
                 model=simple_model,
-                filename=filepath,
+                checkpoint_dir=checkpoint_dir,
                 device=device,
                 optimizer=simple_optimizer,
             )
@@ -753,7 +972,7 @@ class TestErrorHandling:
 
     @patch("src.checkpointing.dist_barrier")
     @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
-    def test_load_handles_corrupted_file(
+    def test_load_handles_corrupted_safetensors(
         self,
         mock_should_save,
         mock_barrier,
@@ -762,17 +981,19 @@ class TestErrorHandling:
         simple_optimizer,
         mock_logger,
     ):
-        """Test loading corrupted checkpoint file."""
-        filepath = os.path.join(temp_dir, "corrupted.pt")
+        """Test loading corrupted safetensors file."""
+        checkpoint_dir = os.path.join(temp_dir, "corrupted")
+        os.makedirs(checkpoint_dir)
 
-        # Create corrupted file
-        with open(filepath, "wb") as f:
+        # Create corrupted safetensors file
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        with open(model_path, "wb") as f:
             f.write(b"corrupted data")
 
         with pytest.raises(Exception):
             load_agent(
                 model=simple_model,
-                filepath=filepath,
+                checkpoint_dir=checkpoint_dir,
                 optimizer=simple_optimizer,
                 device="cpu",
             )
@@ -791,13 +1012,13 @@ class TestErrorHandling:
         mock_logger,
     ):
         """Test loading checkpoint with incompatible architecture."""
-        filepath = os.path.join(temp_dir, "incompatible.pt")
+        checkpoint_dir = os.path.join(temp_dir, "incompatible")
         device = torch.device("cpu")
 
         # Save current model
         save_agent(
             model=simple_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
             optimizer=simple_optimizer,
         )
@@ -810,11 +1031,11 @@ class TestErrorHandling:
         )
         different_optimizer = torch.optim.Adam(different_model.parameters())
 
-        # Load should fail or warn with strict=True
+        # Load should fail with strict=True
         with pytest.raises(RuntimeError):
             load_agent(
                 model=different_model,
-                filepath=filepath,
+                checkpoint_dir=checkpoint_dir,
                 optimizer=different_optimizer,
                 device="cpu",
                 strict=True,
@@ -836,23 +1057,29 @@ class TestModulePrefixHandling:
         self, mock_should_save, mock_barrier, temp_dir, simple_model, mock_logger
     ):
         """Test loading checkpoint saved with DataParallel wrapper."""
-        filepath = os.path.join(temp_dir, "checkpoint_with_prefix.pt")
+        from safetensors.torch import save_file as save_safetensors
+
+        checkpoint_dir = os.path.join(temp_dir, "checkpoint_with_prefix")
+        os.makedirs(checkpoint_dir)
 
         # Create checkpoint with 'module.' prefix
         state_dict = simple_model.state_dict()
         prefixed_state = {f"module.{k}": v for k, v in state_dict.items()}
 
-        checkpoint = {
-            "model_state_dict": prefixed_state,
-            "metadata": {},
-        }
-        torch.save(checkpoint, filepath)
+        # Save model with prefix
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        save_safetensors(prefixed_state, model_path)
+
+        # Save empty metadata
+        metadata_path = os.path.join(checkpoint_dir, "metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump({}, f)
 
         # Load into regular model (should strip prefix)
         optimizer = torch.optim.Adam(simple_model.parameters())
         load_agent(
             model=simple_model,
-            filepath=filepath,
+            checkpoint_dir=checkpoint_dir,
             optimizer=optimizer,
             device="cpu",
         )
@@ -886,20 +1113,21 @@ class TestPerformance:
         )
         optimizer = torch.optim.Adam(large_model.parameters())
 
-        filepath = os.path.join(temp_dir, "large_checkpoint.pt")
+        checkpoint_dir = os.path.join(temp_dir, "large_checkpoint")
         device = torch.device("cpu")
 
         # Save
         save_agent(
             model=large_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
             optimizer=optimizer,
         )
 
-        # Verify file was created and has reasonable size
-        assert os.path.exists(filepath)
-        file_size = os.path.getsize(filepath)
+        # Verify files were created and have reasonable size
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        assert os.path.exists(model_path)
+        file_size = os.path.getsize(model_path)
         # Should be at least 1KB
         assert file_size > 1000
 
@@ -915,7 +1143,7 @@ class TestPerformance:
 
         load_agent(
             model=new_model,
-            filepath=filepath,
+            checkpoint_dir=checkpoint_dir,
             optimizer=new_optimizer,
             device="cpu",
         )
@@ -936,7 +1164,7 @@ class TestPerformance:
         mock_logger,
     ):
         """Test multiple save/load cycles to ensure no corruption."""
-        filepath = os.path.join(temp_dir, "multi_cycle.pt")
+        checkpoint_dir = os.path.join(temp_dir, "multi_cycle")
         device = torch.device("cpu")
 
         for i in range(5):
@@ -948,7 +1176,7 @@ class TestPerformance:
             # Save
             save_agent(
                 model=simple_model,
-                filename=filepath,
+                checkpoint_dir=checkpoint_dir,
                 device=device,
                 optimizer=simple_optimizer,
                 metadata={"cycle": i},
@@ -957,7 +1185,7 @@ class TestPerformance:
             # Load back
             metadata = load_agent(
                 model=simple_model,
-                filepath=filepath,
+                checkpoint_dir=checkpoint_dir,
                 optimizer=simple_optimizer,
                 device="cpu",
             )
@@ -984,12 +1212,12 @@ class TestEdgeCases:
         mock_logger,
     ):
         """Test saving with None metadata."""
-        filepath = os.path.join(temp_dir, "empty_metadata.pt")
+        checkpoint_dir = os.path.join(temp_dir, "empty_metadata")
         device = torch.device("cpu")
 
         save_agent(
             model=simple_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
             optimizer=simple_optimizer,
             metadata=None,
@@ -997,7 +1225,7 @@ class TestEdgeCases:
 
         metadata = load_agent(
             model=simple_model,
-            filepath=filepath,
+            checkpoint_dir=checkpoint_dir,
             optimizer=simple_optimizer,
             device="cpu",
         )
@@ -1006,68 +1234,294 @@ class TestEdgeCases:
 
     @patch("src.checkpointing.dist_barrier")
     @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
-    def test_save_without_optimizer(
-        self, mock_should_save, mock_barrier, temp_dir, simple_model, mock_logger
+    def test_save_with_complex_metadata(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        simple_model,
+        simple_optimizer,
+        mock_logger,
     ):
-        """Test saving without optimizer (should still work)."""
-        filepath = os.path.join(temp_dir, "no_optimizer.pt")
+        """Test saving with complex metadata including tensors."""
+        checkpoint_dir = os.path.join(temp_dir, "complex_metadata")
         device = torch.device("cpu")
 
-        # Note: The function requires optimizer, so we pass it
-        # but the test verifies it handles missing optimizer state
-        optimizer = torch.optim.Adam(simple_model.parameters())
+        metadata = {
+            "epoch": 42,
+            "loss_history": [0.5, 0.4, 0.3],
+            "config": {
+                "learning_rate": 0.001,
+                "batch_size": 32,
+            },
+            "tensor_stat": torch.tensor([1.0, 2.0, 3.0]),
+        }
 
         save_agent(
             model=simple_model,
-            filename=filepath,
+            checkpoint_dir=checkpoint_dir,
             device=device,
-            optimizer=optimizer,
+            optimizer=simple_optimizer,
+            metadata=metadata,
         )
 
-        # Should be able to load with different optimizer
-        new_optimizer = torch.optim.SGD(simple_model.parameters(), lr=0.01)
-        load_agent(
+        loaded_metadata = load_agent(
             model=simple_model,
-            filepath=filepath,
-            optimizer=new_optimizer,
+            checkpoint_dir=checkpoint_dir,
+            optimizer=simple_optimizer,
             device="cpu",
         )
 
-    # Suppress PyTorch warning about zero-element tensor initialization
-    @pytest.mark.filterwarnings(
-        "ignore:Initializing zero-element tensors is a no-op:UserWarning"
-    )
+        assert loaded_metadata["epoch"] == 42
+        assert loaded_metadata["loss_history"] == [0.5, 0.4, 0.3]
+        assert loaded_metadata["config"]["learning_rate"] == 0.001
+        # Tensor should have been converted to list
+        assert loaded_metadata["tensor_stat"] == [1.0, 2.0, 3.0]
+
     @patch("src.checkpointing.dist_barrier")
-    def test_load_with_no_loss_fn_in_checkpoint(
-        self, mock_barrier, temp_dir, simple_model, mock_logger
+    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
+    def test_save_without_loss_fn_load_with_loss_fn(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        simple_model,
+        simple_optimizer,
+        mock_logger,
     ):
-        """Test loading with loss_fn provided but not in checkpoint."""
-        filepath = os.path.join(temp_dir, "no_loss_fn.pt")
-        # Create checkpoint without loss_fn
-        checkpoint = {
-            "model_state_dict": simple_model.state_dict(),
-            "metadata": {},
-        }
-        torch.save(checkpoint, filepath)
+        """Test loading with loss_fn when checkpoint doesn't have one."""
+        checkpoint_dir = os.path.join(temp_dir, "no_loss_fn")
+        device = torch.device("cpu")
+
+        # Save without loss function
+        save_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            device=device,
+            optimizer=simple_optimizer,
+        )
+
+        # Verify loss_fn file doesn't exist
+        assert not os.path.exists(os.path.join(checkpoint_dir, "loss_fn.pt"))
+
+        # Load with loss function
         loss_fn = nn.AdaptiveLogSoftmaxWithLoss(5, 100, [10, 50])
-        optimizer = torch.optim.Adam(simple_model.parameters())
         load_agent(
             model=simple_model,
-            filepath=filepath,
-            optimizer=optimizer,
+            checkpoint_dir=checkpoint_dir,
+            optimizer=simple_optimizer,
             device="cpu",
             loss_fn=loss_fn,
         )
-        # Should warn about missing loss function state in checkpoint
-        # The actual warning message is:
-        # "Loss function provided but no state in checkpoint.
-        #  Using random initialization!"
+
+        # Should warn about missing loss function state
         warning_messages = [str(call) for call in mock_logger.warning.call_args_list]
         found_warning = any(
             "Loss function" in msg and "checkpoint" in msg.lower()
             for msg in warning_messages
         )
-        assert found_warning, (
-            f"Expected warning about missing loss function in checkpoint, "
-            f"got warnings: {warning_messages}"
+        assert found_warning
+
+    @patch("src.checkpointing.dist_barrier")
+    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
+    def test_load_with_missing_optimizer_file(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        simple_model,
+        simple_optimizer,
+        mock_logger,
+    ):
+        """Test loading when optimizer file is missing."""
+        from safetensors.torch import save_file as save_safetensors
+
+        checkpoint_dir = os.path.join(temp_dir, "missing_optimizer")
+        os.makedirs(checkpoint_dir)
+
+        # Save only model and metadata
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        save_safetensors(simple_model.state_dict(), model_path)
+
+        metadata_path = os.path.join(checkpoint_dir, "metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump({"epoch": 1}, f)
+
+        # Load should work, optimizer state should not be loaded
+        metadata = load_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            optimizer=simple_optimizer,
+            device="cpu",
         )
+
+        assert metadata == {"epoch": 1}
+        mock_logger.debug.assert_any_call("No optimizer state found in checkpoint")
+
+    @patch("src.checkpointing.dist_barrier")
+    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
+    def test_load_with_missing_metadata_file(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        simple_model,
+        simple_optimizer,
+        mock_logger,
+    ):
+        """Test loading when metadata file is missing."""
+        from safetensors.torch import save_file as save_safetensors
+
+        checkpoint_dir = os.path.join(temp_dir, "missing_metadata")
+        os.makedirs(checkpoint_dir)
+
+        # Save only model and optimizer
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        save_safetensors(simple_model.state_dict(), model_path)
+
+        optimizer_path = os.path.join(checkpoint_dir, "optimizer.pt")
+        torch.save(simple_optimizer.state_dict(), optimizer_path)
+
+        # Load should work, metadata should be empty
+        metadata = load_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            optimizer=simple_optimizer,
+            device="cpu",
+        )
+
+        assert metadata == {}
+
+    @patch("src.checkpointing.dist_barrier")
+    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
+    def test_overwrite_existing_checkpoint(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        simple_model,
+        simple_optimizer,
+        mock_logger,
+    ):
+        """Test overwriting an existing checkpoint."""
+        checkpoint_dir = os.path.join(temp_dir, "overwrite")
+        device = torch.device("cpu")
+
+        # Save first checkpoint
+        save_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            device=device,
+            optimizer=simple_optimizer,
+            metadata={"version": 1},
+        )
+
+        # Modify model
+        with torch.no_grad():
+            for param in simple_model.parameters():
+                param.fill_(99.0)
+
+        # Save second checkpoint (overwrite)
+        save_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            device=device,
+            optimizer=simple_optimizer,
+            metadata={"version": 2},
+        )
+
+        # Load and verify it's the second version
+        metadata = load_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            optimizer=simple_optimizer,
+            device="cpu",
+        )
+
+        assert metadata["version"] == 2
+
+        # Verify model weights are from second save
+        for param in simple_model.parameters():
+            assert torch.allclose(param, torch.full_like(param, 99.0))
+
+
+# ============================================================================
+# Safetensors-specific Tests
+# ============================================================================
+
+
+@pytest.mark.integration
+class TestSafetensorsSpecific:
+    """Tests specific to safetensors format."""
+
+    @patch("src.checkpointing.dist_barrier")
+    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
+    def test_safetensors_file_can_be_loaded_directly(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        simple_model,
+        simple_optimizer,
+        mock_logger,
+    ):
+        """Test that saved safetensors can be loaded with safetensors library directly."""
+        from safetensors.torch import load_file as load_safetensors
+
+        checkpoint_dir = os.path.join(temp_dir, "direct_load")
+        device = torch.device("cpu")
+
+        save_agent(
+            model=simple_model,
+            checkpoint_dir=checkpoint_dir,
+            device=device,
+            optimizer=simple_optimizer,
+        )
+
+        # Load directly with safetensors
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        state_dict = load_safetensors(model_path)
+
+        # Verify all model keys are present
+        original_keys = set(simple_model.state_dict().keys())
+        loaded_keys = set(state_dict.keys())
+        assert original_keys == loaded_keys
+
+    @patch("src.checkpointing.dist_barrier")
+    @patch("src.checkpointing._should_save_on_this_rank", return_value=True)
+    def test_safetensors_tensors_are_contiguous(
+        self,
+        mock_should_save,
+        mock_barrier,
+        temp_dir,
+        mock_logger,
+    ):
+        """Test that saved tensors are contiguous (required by safetensors)."""
+        from safetensors.torch import load_file as load_safetensors
+
+        # Create model with potentially non-contiguous tensors
+        model = nn.Sequential(
+            nn.Linear(10, 20),
+            nn.Linear(20, 10),
+        )
+
+        # Make some tensors non-contiguous
+        with torch.no_grad():
+            model[0].weight = nn.Parameter(model[0].weight.t().t())  # Transpose twice
+
+        optimizer = torch.optim.Adam(model.parameters())
+        checkpoint_dir = os.path.join(temp_dir, "contiguous_test")
+        device = torch.device("cpu")
+
+        # This should not raise even with non-contiguous tensors
+        save_agent(
+            model=model,
+            checkpoint_dir=checkpoint_dir,
+            device=device,
+            optimizer=optimizer,
+        )
+
+        # Verify the saved tensors can be loaded
+        model_path = os.path.join(checkpoint_dir, "model.safetensors")
+        state_dict = load_safetensors(model_path)
+        assert len(state_dict) > 0

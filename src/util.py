@@ -149,3 +149,95 @@ def dist_barrier(device: "torch.device") -> None:
             f"Done dist.barrier(), rank: {rank}, device: {device}",
             all_ranks=True,
         )
+
+
+def get_device_info() -> dict:
+    """Detect available device and backend type."""
+    import torch
+
+    device_info = {
+        "device": "cpu",
+        "backend": "cpu",
+        "device_name": "CPU",
+        "device_count": 1,
+    }
+    if torch.cuda.is_available():
+        # Check for NVIDIA CUDA/AMD ROCm
+        device_info["device"] = "cuda"
+        device_info["device_count"] = torch.cuda.device_count()
+        device_info["device_name"] = torch.cuda.get_device_name(0)
+        # Distinguish between NVIDIA CUDA and AMD ROCm
+        if torch.version.hip is not None:
+            # AMD GPU
+            device_info["backend"] = "rocm"
+        else:
+            # NVIDIA GPU
+            device_info["backend"] = "cuda"
+        return device_info
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # Check for Apple Silicon MPS
+        device_info["device"] = "mps"
+        device_info["backend"] = "mps"
+        device_info["device_name"] = "Apple Silicon"
+        return device_info
+    else:
+        # Check for TPU (requires torch_xla)
+        try:
+            import torch_xla.core.xla_model as xm
+
+            device_info["device"] = "xla"
+            device_info["backend"] = "tpu"
+            device_info["device_name"] = "TPU"
+            device_info["device_count"] = xm.xrt_world_size()
+            return device_info
+        except ImportError:
+            pass
+
+    return device_info
+
+
+def setup_backend_settings(backend: str) -> None:
+    """Configure backend-specific optimizations and seeding."""
+    import torch
+
+    # torch.manual_seed(3407) is all you need
+    # https://arxiv.org/pdf/2109.08203
+    seed = 3407
+    torch.manual_seed(seed)
+    if backend in ("cuda", "rocm"):
+        _setup_cuda_backend(seed, backend)
+    elif backend == "tpu":
+        _setup_tpu_backend(seed)
+    elif backend == "mps":
+        _setup_mps_backend()
+    # CPU needs no additional setup beyond torch.manual_seed()
+
+
+def _setup_cuda_backend(seed: int, backend: str) -> None:
+    """Configure CUDA/ROCm backend settings."""
+    import torch
+
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = True
+    if backend == "cuda":
+        if torch.cuda.get_device_capability()[0] >= 8:
+            # TF32 settings (NVIDIA Ampere+ only, compute capability >= 8.0)
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+    torch.cuda.empty_cache()
+
+
+def _setup_tpu_backend(seed: int) -> None:
+    """Configure TPU backend settings."""
+    import torch_xla.core.xla_model as xm
+
+    xm.set_rng_state(seed)
+
+
+def _setup_mps_backend() -> None:
+    """Configure Apple MPS backend settings."""
+    import torch
+
+    # MPS uses torch.manual_seed() for seeding
+    torch.mps.empty_cache()

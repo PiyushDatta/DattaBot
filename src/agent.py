@@ -13,20 +13,20 @@ from src.api_interface import DattaBotAPIResponse
 from src.checkpointing import load_agent, save_agent
 from src.communication_mgr import DattaBotCommunicationManager
 from src.data_loader import DattabotDataBuilder
-
 from src.gpu_profiler import BackgroundGPUProfiler
 from src.logger import get_logger
 from src.metric_tracker import get_metric_tracker, MetricTracker
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
 from src.util import (
+    get_device_info,
     get_logging_level_from_config,
     get_tensor_dtype_from_config,
     is_device_cpu,
     is_rank_0,
+    setup_backend_settings,
     setup_torch_dist_init,
 )
-
 from torch import nn, Tensor
 from torch.distributed.fsdp import FSDPModule, fully_shard, MixedPrecisionPolicy
 from torch.optim.lr_scheduler import OneCycleLR as TorchOneCycleLR
@@ -51,14 +51,8 @@ class Agent:
         self.plot_dir = self.config.agent.plot_directory
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         self.autocast_dtype = torch.bfloat16
-        # Setup hardware settings.
-        self.agent_device = self.config.env.device
-        self._setup_cpu_gpu_settings()
-        # Setup multi-gpu settings.
-        if dist.is_available() and torch.cuda.device_count() > 1:
-            self._setup_distributed()
-        # Setup device.
-        self.agent_device = torch.device(self.agent_device)
+        # Setup compute.
+        self._initialize_compute()
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
         self.comm_manager = DattaBotCommunicationManager()
@@ -95,8 +89,12 @@ class Agent:
         # We pass in tensor_dtype to the model, but remember we may use
         # AMP autocast during model inference/training which will have
         # all tensors as float16/bfloat16.
-        self.model = DattaBotModel(device=self.agent_device, dtype=self.tensor_dtype)
-        self.model.to(device=self.agent_device, dtype=self.tensor_dtype)
+        with torch.device("meta"):
+            self.model = DattaBotModel(
+                device=self.agent_device, dtype=self.tensor_dtype
+            )
+        self.model.to_empty(device=self.agent_device)
+        self.model.init_weights()
         self.logger.info(f"Model is on: {self.agent_device}")
         self.logger.info(f"Model dimensions: {self.d_model}")
         self.logger.info(
@@ -145,7 +143,7 @@ class Agent:
             raise FileNotFoundError(f"Weights path does not exist: {weights_dir}")
         load_agent(
             model=self.model,
-            filepath=self.weights_fname,
+            checkpoint_dir=self.weights_fname,
             device=self.agent_device,
             loss_fn=self.loss_fn,
             optimizer=self.optimizer,
@@ -167,12 +165,52 @@ class Agent:
             self.logger.info("Destroying distributed process group...")
             dist.destroy_process_group()
 
+    def _initialize_compute(self):
+        """Main entry point for all compute setup."""
+        # Detect available hardware
+        self.device_info = get_device_info()
+        self.logger.info(
+            f"Detected backend: {self.device_info['backend']}, "
+            f"device: {self.device_info['device_name']}, "
+            f"count: {self.device_info['device_count']}"
+        )
+        # Setup device assignment (handles distributed if initialized)
+        self._setup_device()
+        # Configure backend-specific optimizations
+        setup_backend_settings(backend=self.device_info["backend"])
+
+    def _setup_device(self):
+        """Assign the appropriate device based on backend and distributed config."""
+        backend = self.device_info["backend"]
+        is_distributed = dist.is_available() and dist.is_initialized()
+        if is_distributed:
+            self.local_rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+        else:
+            self.local_rank = 0
+            self.world_size = 1
+        if backend in ("cuda", "rocm"):
+            torch.cuda.set_device(self.local_rank)
+            self.agent_device = torch.device(f"cuda:{self.local_rank}")
+        elif backend == "tpu":
+            import torch_xla.core.xla_model as xm
+
+            self.agent_device = xm.xla_device()
+        elif backend == "mps":
+            self.agent_device = torch.device("mps")
+        else:
+            self.agent_device = torch.device("cpu")
+        self.logger.debug(
+            f"Device setup complete: device={self.agent_device}, "
+            f"local_rank={self.local_rank}, world_size={self.world_size}"
+        )
+
     def _save_agent(self):
         """Helper method to save agent."""
         save_agent(
             model=self.model,
             device=self.agent_device,
-            filename=self.weights_fname,
+            checkpoint_dir=self.weights_fname,
             loss_fn=self.loss_fn,
             optimizer=self.optimizer,
         )
@@ -198,21 +236,37 @@ class Agent:
         self.logger.debug(
             f"Setting up setup_distributed with local_rank={self.local_rank}"
         )
-        torch.cuda.set_device(self.local_rank)
-        self.agent_device = f"cuda:{self.local_rank}"
 
     def _setup_cpu_gpu_settings(self):
         # torch.manual seed(3407) is all you need
         # https://arxiv.org/pdf/2109.08203
         seed = 3407
         torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.fp32_precision = "tf32"
-        torch.backends.cudnn.conv.fp32_precision = "tf32"
-        self.agent_device = self.config.env.device
-        torch.cuda.empty_cache()
+        backend = self.device_info["backend"]
+        # Setup backend.
+        if backend in ("cuda", "rocm"):
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.benchmark = True
+            if backend == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+                # TF32 settings (NVIDIA Ampere+ only)
+                torch.backends.cuda.matmul.fp32_precision = "tf32"
+                torch.backends.cudnn.conv.fp32_precision = "tf32"
+            torch.cuda.empty_cache()
+        elif backend == "tpu":
+            import torch_xla.core.xla_model as xm
+
+            xm.set_rng_state(seed)
+        # Setup device.
+        if self.device_info["backend"] in ("cuda", "rocm"):
+            torch.cuda.set_device(self.local_rank)
+            self.agent_device = f"cuda:{self.local_rank}"
+        elif self.device_info["backend"] == "tpu":
+            import torch_xla.core.xla_model as xm
+
+            self.agent_device = xm.xla_device()
+        else:
+            self.agent_device = "cpu"
 
     def _compute_loss(
         self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None

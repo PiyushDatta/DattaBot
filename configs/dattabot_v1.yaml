@@ -13,7 +13,7 @@ neural_net:
     moe_load_balance_weight: 0.01
 agent:
     agent_name: "DattaBot"
-    weights_file_name: "dattabot-weights/DATTABOT_VERSION_1_0_weights.pt"
+    weights_file_name: "dattabot-weights"
     batch_size: 8
     max_response_tokens: 256
     max_training_num_epochs: 1_000_000
@@ -48,7 +48,6 @@ inference:
     use_cache: true
 env:
     env_name: "DattaBotV1"
-    device: "cuda"
     num_update_target: 1
     num_save_weights: 50
     train: true

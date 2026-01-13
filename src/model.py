@@ -3,7 +3,6 @@ from typing import Optional
 
 import torch.nn as nn
 import torch.nn.functional as F
-
 from src.agent_config import get_agent_config
 from src.logger import get_logger
 from src.tokenizer import get_tokenizer
@@ -12,6 +11,7 @@ from torch import (
     arange,
     backends,
     cat,
+    device as torch_device,
     dtype,
     einsum,
     empty,
@@ -31,7 +31,7 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 
 # Transformer Model.
 class DattaBotModel(nn.Module):
-    def __init__(self, device: str = "cpu", dtype: dtype = "float32") -> None:
+    def __init__(self, device: torch_device, dtype: dtype = "float32") -> None:
         super().__init__()
         self.config = get_agent_config()
         self.logger = get_logger(
@@ -52,8 +52,7 @@ class DattaBotModel(nn.Module):
         self.token_embedding = nn.Embedding(self.vocab_size, self.d_model)
         self.emb_dropout = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
         self.decoder_stack = TransformerDecoderStack(
-            n_layers=self.n_layers,
-            d_model=self.d_model,
+            n_layers=self.n_layers, d_model=self.d_model, device=self.device
         )
         self.final_norm = RMSNorm(dim=self.d_model)
         self.gradient_checkpointing = self.config.neural_net.gradient_checkpointing
@@ -70,6 +69,10 @@ class DattaBotModel(nn.Module):
         self.logger.info(
             "Gradient checkpointing enabled for all decoder layers.", all_ranks=True
         )
+
+    def init_weights(self) -> None:
+        # TODO(PiyushDatta): Add initialization of weights.
+        pass
 
     @property
     def layers(self):
@@ -114,16 +117,12 @@ class DattaBotModel(nn.Module):
 
 
 class TransformerDecoderStack(nn.Module):
-    def __init__(
-        self,
-        n_layers: int,
-        d_model: int,
-    ) -> None:
+    def __init__(self, n_layers: int, d_model: int, device: torch_device) -> None:
         super().__init__()
         # Multiple attention layers.
         self.layers = nn.ModuleList(
             [
-                TransformerDecoderBlock(embedded_dim_size=d_model)
+                TransformerDecoderBlock(embedded_dim_size=d_model, device=device)
                 for _ in range(n_layers)
             ]
         )
@@ -156,12 +155,13 @@ class TransformerDecoderBlock(nn.Module):
     def __init__(
         self,
         embedded_dim_size: int,
+        device: torch_device,
     ) -> None:
         super().__init__()
         self.config = get_agent_config()
         # Self attention.
         self.multi_head_attn = TransformerMultiHeadAttention(
-            embedded_dim_size=embedded_dim_size
+            embedded_dim_size=embedded_dim_size, device=device
         )
         self.multi_head_attn_norm = RMSNorm(dim=embedded_dim_size)
         self.multi_head_attn_dropout = nn.Dropout(
@@ -262,7 +262,7 @@ class TransformerPositionWiseFeedForward(nn.Module):
 
 
 class TransformerMultiHeadAttention(nn.Module):
-    def __init__(self, embedded_dim_size: int) -> None:
+    def __init__(self, embedded_dim_size: int, device: torch_device) -> None:
         super().__init__()
         self.config = get_agent_config()
         self.n_heads = self.config.neural_net.n_heads
@@ -276,7 +276,7 @@ class TransformerMultiHeadAttention(nn.Module):
         self.rope = RotaryPositionalEmbedding(
             dim=self.head_dim,
             max_seq_len=self.config.agent.max_response_tokens * 2,
-            device=self.config.env.device,
+            device=device,
         )
         self.dropout = nn.Dropout(p=self.config.neural_net.zeroed_drop_probability)
 
