@@ -101,54 +101,98 @@ def get_logging_level_from_config(config: DictConfig) -> int:
 
 
 def setup_torch_dist_init():
-    """Initialize torch distributed - imports only when called"""
+    """Initialize torch distributed across CUDA, ROCm, TPU, MPS, CPU."""
+    import os
+    import torch
     import torch.distributed as dist
-    from torch import device as torch_device
-    from torch.cuda import device_count as torch_device_count
-
+    from datetime import timedelta
     if not dist.is_available() or dist.is_initialized():
         return
-    # Detect if we're running under torchrun or another distributed launcher.
-    torchrun_set: bool = torch_device_count() > 1
-    if not torchrun_set:
+    # torchrun / XLA launcher detection
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        print("[setup_torch_dist_init] Single-process execution.")
+        return
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    # --------------------
+    # TPU (XLA)
+    # --------------------
+    try:
+        import torch_xla.core.xla_model as xm
+        import torch_xla.distributed.xla_backend as xla_backend
+
+        if xm.xrt_world_size() > 1:
+            dist.init_process_group(
+                backend="xla",
+                init_method="xla://",
+                timeout=timedelta(seconds=3600),
+            )
+            device = xm.xla_device()
+            xm.mark_step()
+            print(
+                f"[setup_torch_dist_init] TPU distributed initialized "
+                f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
+            )
+            return
+    except ImportError:
+        pass
+    # --------------------
+    # CUDA / ROCm
+    # --------------------
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        backend = "nccl"
+        os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+
+        dist.init_process_group(
+            backend=backend,
+            timeout=timedelta(seconds=3600),
+        )
+
+        device = torch.device(f"cuda:{local_rank}")
+        dist_barrier(device)
         print(
-            "[setup_torch_dist_init] No torchrun environment detected, running single process."
+            f"[setup_torch_dist_init] CUDA/ROCm distributed initialized "
+            f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
         )
         return
-    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
-    local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch_device(f"cuda:{local_rank}")
-    backend = dist.get_default_backend_for_device(device)
+    # --------------------
+    # CPU / Apple MPS
+    # --------------------
+    backend = "gloo"
     dist.init_process_group(
         backend=backend,
-        # 60 minutes.
         timeout=timedelta(seconds=3600),
     )
-    dist_barrier(device=device)
+    device = torch.device("cpu")
+    dist_barrier(device)
     print(
-        f"[setup_torch_dist_init] Initialized distributed (rank={dist.get_rank()}, world_size={dist.get_world_size()})"
+        f"[setup_torch_dist_init] Gloo distributed initialized "
+        f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
     )
 
 
 def dist_barrier(device: "torch.device") -> None:
     """Helper method to synchronize agent if model is distributed."""
     import torch.distributed as dist
-
-    if dist.is_available() and dist.is_initialized():
-        from src.logger import get_logger
-
-        logger = get_logger()
-        rank = dist.get_rank()
-        logger.debug(
-            f"Starting dist.barrier(), rank: {rank}, device: {device}",
-            all_ranks=True,
-        )
+    if not dist.is_available() or not dist.is_initialized():
+        return
+    from src.logger import get_logger
+    logger = get_logger()
+    rank = dist.get_rank()
+    logger.debug(
+        f"Starting dist.barrier(), rank: {rank}, device: {device}",
+        all_ranks=True,
+    )
+    if device.type == "cuda":
         dist.barrier(device_ids=([device.index] if device.type == "cuda" else None))
-        # dist.barrier()
-        logger.debug(
-            f"Done dist.barrier(), rank: {rank}, device: {device}",
-            all_ranks=True,
-        )
+    else:
+        dist.barrier()
+    logger.debug(
+        f"Done dist.barrier(), rank: {rank}, device: {device}",
+        all_ranks=True,
+    )
 
 
 def get_device_info() -> dict:
