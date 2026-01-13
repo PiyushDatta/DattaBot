@@ -13,7 +13,7 @@ neural_net:
     moe_load_balance_weight: 0.01
 agent:
     agent_name: "DattaBot"
-    weights_file_name: "dattabot-weights"
+    weights_file_name: "dattabot-weights/DATTABOT_V1_WEIGHTS"
     batch_size: 8
     max_response_tokens: 256
     max_training_num_epochs: 1_000_000
