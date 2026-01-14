@@ -148,15 +148,32 @@ def detect_num_devices() -> dict:
     except Exception:
         pass
     # --------------------
-    # TPU (XLA)
+    # TPU (PJRT / torch-xla)
     # --------------------
     try:
+        import os
         import torch_xla.core.xla_model as xm
-
-        return {
-            "device": "tpu",
-            "count": xm.xrt_world_size(),
-        }
+        # Hard signal: TPU runtime explicitly enabled
+        if os.environ.get("PJRT_DEVICE") == "TPU":
+            # forces runtime init
+            _ = xm.xla_device()  
+            # best effort world size detection
+            try:
+                count = xm.xrt_world_size()
+                if count == 0:
+                    raise RuntimeError
+            except Exception:
+                # fallback, visible XLA devices
+                visible = os.environ.get("XLA_VISIBLE_DEVICES")
+                if visible:
+                    count = len(visible.split(","))
+                else:
+                    # Single-process TPU (still valid)
+                    count = 1
+            return {
+                "device": "tpu",
+                "count": count,
+            }
     except Exception:
         pass
     # --------------------
@@ -173,6 +190,7 @@ def process_api_cmd(api_cmd: str, api_args: str):
     num_devices = device_info["count"]
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
+    print(f"Processing API command: {api_cmd} with args: {api_args}, device: {device}, num_devices: {num_devices}")
     # --------------------
     # Distributed execution (CUDA / ROCm / TPU)
     # --------------------
@@ -226,6 +244,7 @@ def run_client():
     num_devices = device_info["count"]
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
+    print(f"Running client: device: {device}, num_devices: {num_devices}")
     # --------------------
     # Distributed execution
     # --------------------
