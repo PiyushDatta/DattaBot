@@ -108,45 +108,85 @@ def run_subprocess(cmd: list[str], check: bool = True):
     return returncode
 
 
-def detect_num_gpus() -> int:
-    """Detect number of GPUs using nvidia-smi first, then PyTorch as fallback."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=count", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        num_gpus = int(result.stdout.strip() or 0)
-        if num_gpus > 0:
-            return num_gpus
-    except Exception:
-        pass
+def detect_num_devices() -> dict:
+    """
+    Detect available accelerator devices.
 
-    # Try torch.
+    Returns:
+        {
+            "device": one of {"cuda", "rocm", "tpu", "mps", "cpu"},
+            "count": int,
+        }
+    """
+    # --------------------
+    # CUDA / ROCm (NVIDIA + AMD)
+    # --------------------
     try:
         import torch
 
-        num_gpus = torch.cuda.device_count()
-        return num_gpus
-    except ImportError:
-        return 0
+        if torch.cuda.is_available():
+            count = torch.cuda.device_count()
+            backend = "rocm" if torch.version.hip is not None else "cuda"
+            return {
+                "device": backend,
+                "count": count,
+            }
+    except Exception:
+        pass
+    # --------------------
+    # Apple Silicon (MPS)
+    # --------------------
+    try:
+        import torch
 
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            # MPS is single-device by design
+            return {
+                "device": "mps",
+                "count": 1,
+            }
+    except Exception:
+        pass
+    # --------------------
+    # TPU (XLA)
+    # --------------------
+    try:
+        import torch_xla.core.xla_model as xm
+
+        return {
+            "device": "tpu",
+            "count": xm.xrt_world_size(),
+        }
+    except Exception:
+        pass
+    # --------------------
+    # CPU fallback
+    # --------------------
+    return {
+        "device": "cpu",
+        "count": 0,
+    }
 
 def process_api_cmd(api_cmd: str, api_args: str):
-    num_gpus = detect_num_gpus()
+    device_info = detect_num_devices()
+    device = device_info["device"]
+    num_devices = device_info["count"]
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
-
-    if num_gpus > 1:
-        print(f"Detected {num_gpus} GPUs, running distributed with torchrun...")
+    # --------------------
+    # Distributed execution (CUDA / ROCm / TPU)
+    # --------------------
+    if device in {"cuda", "rocm", "tpu"} and num_devices > 1:
+        print(
+            f"Detected {num_devices} {device} devices, running distributed with torchrun..."
+        )
         cmd = [
             sys.executable,
             "-m",
             "torch.distributed.run",
             f"--nnodes={nnodes}",
             f"--node_rank={node_rank}",
-            f"--nproc_per_node={num_gpus}",
+            f"--nproc_per_node={num_devices}",
             "--rdzv_id=datta_bot_job",
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:29500",
@@ -156,8 +196,13 @@ def process_api_cmd(api_cmd: str, api_args: str):
             "--api_args",
             api_args,
         ]
-    elif num_gpus == 1:
-        print("Single GPU detected, running without torchrun for faster startup.")
+    # --------------------
+    # Single accelerator (CUDA / ROCm / TPU / MPS)
+    # --------------------
+    elif device in {"cuda", "rocm", "tpu", "mps"}:
+        print(f"Single {device} device detected, running without torchrun.")
+        if device in {"cuda", "rocm"}:
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         cmd = [
             sys.executable,
             "api_runner.py",
@@ -166,41 +211,48 @@ def process_api_cmd(api_cmd: str, api_args: str):
             "--api_args",
             api_args,
         ]
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # --------------------
+    # CPU fallback
+    # --------------------
     else:
-        print("No GPUs detected, running client normally on CPU.")
+        print("No accelerators detected, running on CPU.")
         cmd = [sys.executable, "client.py"]
-
     run_subprocess(cmd, check=False)
 
 
 def run_client():
-    num_gpus = detect_num_gpus()
+    device_info = detect_num_devices()
+    device = device_info["device"]
+    num_devices = device_info["count"]
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
-
-    if num_gpus > 1:
-        print(f"Detected {num_gpus} GPUs, running distributed with torchrun...")
+    # --------------------
+    # Distributed execution
+    # --------------------
+    if device in {"cuda", "rocm", "tpu"} and num_devices > 1:
+        print(
+            f"Detected {num_devices} {device} devices, running distributed with torchrun..."
+        )
         cmd = [
             sys.executable,
             "-m",
             "torch.distributed.run",
             f"--nnodes={nnodes}",
             f"--node_rank={node_rank}",
-            f"--nproc_per_node={num_gpus}",
+            f"--nproc_per_node={num_devices}",
             "--rdzv_id=datta_bot_job",
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:29500",
             "client.py",
         ]
-    elif num_gpus == 1:
-        print("Single GPU detected, running client directly (no torchrun).")
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        cmd = [sys.executable, "client.py"]
+    # --------------------
+    # Single device
+    # --------------------
     else:
-        print("No GPUs detected, running client on CPU.")
+        print(f"Running client on single {device} device.")
+        if device in {"cuda", "rocm"}:
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         cmd = [sys.executable, "client.py"]
-
     run_subprocess(cmd, check=False)
 
 
