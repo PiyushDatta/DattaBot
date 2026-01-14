@@ -15,8 +15,8 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
     - Windows powershell: `dattabot_venv\Scripts\Activate.ps1`
     - Linux/Mac/Other: `source dattabot_venv/bin/activate`
 4. Pip install all dependencies
-    - `uv pip install -r pyproject.toml`
     - `export UV_PROJECT_ENVIRONMENT=./dattabot_venv && uv sync`
+    - `uv pip install -r pyproject.toml`
 5. Download the weights
     - `git clone https://huggingface.co/datapi/dattabot-weights`
 

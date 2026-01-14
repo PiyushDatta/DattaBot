@@ -120,7 +120,14 @@ class Agent:
                     output_device=self.local_rank,
                     find_unused_parameters=False,
                 )
-        self.model.cuda()
+
+        if self.device_info["backend"] == "tpu":
+            import torch_xla.core.xla_model as xm
+
+            self.model = xm.wrap(self.model)
+        elif self.device_info["backend"] == "cuda":
+            self.model.cuda()
+
         # TODO(PiyushDatta): Try and get Muon optimizer to work.
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
