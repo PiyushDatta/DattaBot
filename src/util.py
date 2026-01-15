@@ -130,7 +130,7 @@ def setup_torch_dist_init():
             timeout=timedelta(seconds=3600),
         )
         device = torch.device(f"cuda:{local_rank}")
-        dist.barrier()
+        dist_barrier(device)
         print(
             f"[setup_torch_dist_init] CUDA/ROCm distributed initialized "
             f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
@@ -148,7 +148,7 @@ def setup_torch_dist_init():
         timeout=timedelta(seconds=3600),
     )
     device = torch.device("cpu")
-    dist.barrier()
+    dist_barrier(device)
     print(
         f"[setup_torch_dist_init] Gloo distributed initialized "
         f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
@@ -156,9 +156,18 @@ def setup_torch_dist_init():
 
 
 def dist_barrier(device: "torch.device") -> None:
-    """Helper method to synchronize agent if model is distributed."""
+    """
+    Helper method to synchronize agent if model is distributed.
+
+    - CUDA: uses NCCL barrier
+    - CPU/Gloo: uses dist.barrier()
+    - TPU/XLA: NO-OP (XLA uses implicit SPMD synchronization)
+    """
     import torch.distributed as dist
     if not dist.is_available() or not dist.is_initialized():
+        return
+    # TPU/XLA: torch.distributed barriers will deadlock
+    if device.type == "xla":
         return
     from src.logger import get_logger
     logger = get_logger()
