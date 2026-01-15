@@ -57,4 +57,4 @@ env:
     validating_episodes: 100
     logging_level: "INFO"
     tensor_dtype: "float32"
-    dataset_name: "stack_v2_python"
+    dataset_name: "openwebtext"

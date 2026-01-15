@@ -30,7 +30,7 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
 
     gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="pip install torch torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html"
 
-    gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="pip install hydra-core && pip install tiktoken && pip install tqdm && pip install safetensors && pip install psutil && pip install wandb"
+    gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="pip install hydra-core && pip install tiktoken && pip install tqdm && pip install safetensors && pip install psutil && pip install wandb && pip install datasets"
     ```
 2. Download the weights
 ``` 
