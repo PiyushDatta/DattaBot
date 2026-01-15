@@ -113,20 +113,15 @@ def setup_torch_dist_init():
     # --------------------
     # TPU (PJRT / torch_xla)
     # --------------------
-    try:
+    if os.environ.get("PJRT_DEVICE") == "TPU":
         import torch_xla.core.xla_model as xm
-
-        devices = xm.get_xla_supported_devices()
-        if devices:
-            # torch_xla already initializes distributed
-            device = xm.xla_device()
-            print(
-                f"[setup_torch_dist_init] TPU distributed ready "
-                f"(rank={xm.get_ordinal()}, world_size={xm.world_size()})"
-            )
-            return
-    except ImportError:
-        pass
+        # TPU runtime is already initialized by launcher
+        device = xm.xla_device()
+        print(
+            f"[setup_torch_dist_init] TPU distributed ready "
+            f"(rank={xm.get_ordinal()}, world_size={xm.world_size()})"
+        )
+        return
 
     # --------------------
     # CUDA / ROCm
