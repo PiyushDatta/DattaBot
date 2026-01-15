@@ -12,14 +12,21 @@ from src.util import APIActions
 _spawned_processes: list[subprocess.Popen] = []
 
 
-def cleanup_gpu_processes():
-    """Kill all GPU processes and spawned subprocesses."""
-    print("\nCleaning up GPU processes...")
-    # First, kill our spawned subprocesses.
-    for proc in _spawned_processes:
+def cleanup_devices():
+    """
+    Cleanup spawned subprocesses and accelerator state.
+
+    - CUDA / ROCm: terminate spawned + kill stray GPU processes
+    - TPU: terminate spawned ONLY (no device killing)
+    - MPS / CPU: terminate spawned only
+    """
+    print("\nCleaning up processes...")
+    # --------------------
+    # Kill spawned subprocesses (ALL backends)
+    # --------------------
+    for proc in list(_spawned_processes):
         try:
             if proc.poll() is None:
-                # Process is still running
                 print(f"Terminating spawned process {proc.pid}...")
                 proc.terminate()
                 try:
@@ -28,11 +35,37 @@ def cleanup_gpu_processes():
                     print(f"Force killing process {proc.pid}...")
                     proc.kill()
         except Exception as e:
-            print(f"Error terminating process: {e}")
-    # Then, kill any remaining GPU processes.
+            print(f"Error terminating process {proc.pid}: {e}")
+        finally:
+            if proc in _spawned_processes:
+                _spawned_processes.remove(proc)
+    # --------------------
+    # TPU cleanup (SAFE NO-OP for devices)
+    # --------------------
+    if os.environ.get("PJRT_DEVICE") == "TPU":
+        print("TPU environment detected — skipping device-level cleanup")
+
+        # Optional: polite XLA shutdown sync
+        try:
+            import torch_xla.core.xla_model as xm
+
+            if xm.xrt_world_size() > 1:
+                xm.rendezvous("cleanup_exit")
+        except Exception:
+            pass
+
+        print("TPU cleanup complete!")
+        return
+    # --------------------
+    # CUDA / ROCm cleanup
+    # --------------------
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid",
+                "--format=csv,noheader,nounits",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -40,31 +73,34 @@ def cleanup_gpu_processes():
             timeout=5,
         )
         pids = [
-            int(pid.strip()) for pid in result.stdout.strip().split("\n") if pid.strip()
+            int(pid.strip())
+            for pid in result.stdout.strip().split("\n")
+            if pid.strip()
         ]
         if pids:
             print(f"Found {len(pids)} GPU processes to clean up...")
             for pid in pids:
                 try:
                     os.kill(pid, signal.SIGTERM)
-                    print(f"Killed GPU process {pid}")
+                    print(f"Terminated GPU process {pid}")
                 except (ProcessLookupError, PermissionError) as e:
                     print(f"Could not kill process {pid}: {e}")
         else:
-            print("No GPU processes found")
+            print("No stray GPU processes found")
     except (
         subprocess.CalledProcessError,
         FileNotFoundError,
         subprocess.TimeoutExpired,
     ):
-        print("Could not query nvidia-smi for GPU processes")
+        print("nvidia-smi not available or failed — skipping GPU cleanup")
+
     print("Cleanup complete!")
 
 
 def signal_handler(signum, frame):
     """Handle Ctrl+C and other termination signals."""
     print("\n\nReceived interrupt signal, cleaning up...")
-    cleanup_gpu_processes()
+    cleanup_devices()
     sys.exit(0)
 
 
@@ -75,7 +111,7 @@ def register_cleanup_handlers():
     # Termination signal
     signal.signal(signal.SIGTERM, signal_handler)
     # Normal exit
-    atexit.register(cleanup_gpu_processes)
+    atexit.register(cleanup_devices)
 
 
 def run_subprocess(cmd: list[str], check: bool = True):
