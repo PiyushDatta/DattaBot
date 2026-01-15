@@ -152,6 +152,7 @@ class Agent:
         )
         # Ensure loss_fn has correct dtype after loading checkpoint
         self.loss_fn = self.loss_fn.to(dtype=self.autocast_dtype)
+        self.model.to_empty(device=self.agent_device)
         # Setup inference engine when needed.
         self.inference_engine = None
         self.use_moe = self.config.neural_net.use_moe

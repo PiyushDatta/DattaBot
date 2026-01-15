@@ -552,7 +552,7 @@ def load_agent(
         if optimizer is not None and paths["optimizer"].exists():
             optimizer_state = torch.load(
                 paths["optimizer"],
-                map_location=torch.device(device or "cpu"),
+                map_location=torch.device("cpu"),
             )
             _load_optimizer_state(model, optimizer, optimizer_state, device)
             logger.debug("Optimizer state loaded successfully")
@@ -564,7 +564,7 @@ def load_agent(
             if paths["loss_fn"].exists():
                 loss_fn_state = torch.load(
                     paths["loss_fn"],
-                    map_location=torch.device(device or "cpu"),
+                    map_location=torch.device("cpu"),
                 )
                 loss_fn.load_state_dict(loss_fn_state)
                 logger.debug("Loss function state loaded successfully")
