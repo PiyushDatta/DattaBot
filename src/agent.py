@@ -399,7 +399,8 @@ class Agent:
         )
         self.gpu_profiler.start()
         mp.set_start_method("spawn", force=True)
-        torch.cuda.reset_peak_memory_stats(self.agent_device)
+        if self.device_info["backend"] in ("cuda", "rocm"):
+            torch.cuda.reset_peak_memory_stats(self.agent_device)
         self.training = True
 
     def end_training_session(self):
