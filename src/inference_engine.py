@@ -9,7 +9,7 @@ from src.api_interface import DattaBotAPIResponse
 from src.logger import get_logger
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
-from src.util import get_logging_level_from_config, is_device_cpu, is_rank_0
+from src.util import get_logging_level_from_config, is_rank_0, is_autocast_enabled
 from torch import nn, Tensor
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel
@@ -258,7 +258,7 @@ class DattaBotInferenceEngine:
             with torch.no_grad():
                 with torch.autocast(
                     device_type=self.device.type,
-                    enabled=(not is_device_cpu(self.device.type)),
+                    enabled=is_autocast_enabled(self.device),
                     dtype=self.inference_autocast_dtype,
                 ):
                     # Forward pass through model

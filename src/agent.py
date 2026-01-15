@@ -22,7 +22,7 @@ from src.util import (
     get_device_info,
     get_logging_level_from_config,
     get_tensor_dtype_from_config,
-    is_device_cpu,
+    is_autocast_enabled,
     is_rank_0,
     setup_backend_settings,
     setup_torch_dist_init,
@@ -152,7 +152,13 @@ class Agent:
         )
         # Ensure loss_fn has correct dtype after loading checkpoint
         self.loss_fn = self.loss_fn.to(dtype=self.autocast_dtype)
-        self.model.to_empty(device=self.agent_device)
+        # Convert entire model to consistent dtype after loading
+        if is_autocast_enabled(self.agent_device):
+            self.model = self.model.to(dtype=self.autocast_dtype)
+            self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
+        else:
+            self.model = self.model.to(dtype=self.tensor_dtype)
+            self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
         # Setup inference engine when needed.
         self.inference_engine = None
         self.use_moe = self.config.neural_net.use_moe
@@ -638,7 +644,7 @@ class Agent:
             self.optimizer.zero_grad()
             with torch.autocast(
                 device_type=self.agent_device.type,
-                enabled=(not is_device_cpu(str(self.agent_device))),
+                enabled=is_autocast_enabled(self.agent_device),
                 dtype=self.autocast_dtype,
             ):
                 # Forward pass.
@@ -789,7 +795,7 @@ class Agent:
                 attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
                 with torch.autocast(
                     device_type=self.agent_device.type,
-                    enabled=(not is_device_cpu(str(self.agent_device))),
+                    enabled=is_autocast_enabled(self.agent_device),
                     dtype=self.autocast_dtype,
                 ):
                     # Forward pass.

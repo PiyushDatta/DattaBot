@@ -4,7 +4,7 @@ import torch
 import torch.profiler
 from src.agent_config import get_agent_config
 from src.logger import get_logger
-from src.util import get_logging_level_from_config, is_device_cpu, is_rank_0
+from src.util import get_logging_level_from_config, is_rank_0, is_autocast_enabled
 
 
 class AgentProfiler:
@@ -57,7 +57,7 @@ class AgentProfiler:
                 self.agent.optimizer.zero_grad()
                 with torch.autocast(
                     device_type=self.agent.agent_device.type,
-                    enabled=(not is_device_cpu(self.agent.agent_device.type)),
+                    enabled=is_autocast_enabled(self.agent.agent_device),
                     dtype=torch.bfloat16,
                 ):
                     logits = self.agent.model(

@@ -268,6 +268,9 @@ class TransformerMultiHeadAttention(nn.Module):
     def __init__(self, embedded_dim_size: int, device: torch_device) -> None:
         super().__init__()
         self.config = get_agent_config()
+        self.logger = get_logger(
+            logging_level=get_logging_level_from_config(self.config)
+        )
         self.n_heads = self.config.neural_net.n_heads
         self.d_model = embedded_dim_size
         self.head_dim = embedded_dim_size // self.n_heads
@@ -295,10 +298,15 @@ class TransformerMultiHeadAttention(nn.Module):
         q = self.q_proj(input_query)
         k = self.k_proj(input_key)
         v = self.v_proj(input_value)
-        target_dtype = v.dtype
-        if q.dtype != target_dtype:
+        if q.dtype != v.dtype or k.dtype != v.dtype:
+            # Safety check, all should have the same dtype.
+            # This shouldn't happen if model is properly initialized.
+            self.logger.warning(
+                f"Dtype mismatch in attention: q={q.dtype}, k={k.dtype}, v={v.dtype}. "
+                f"This indicates improper model initialization."
+            )
+            target_dtype = v.dtype
             q = q.to(target_dtype)
-        if k.dtype != target_dtype:
             k = k.to(target_dtype)
         # Reshape to split heads: [batch, seq, d_model] -> [batch, seq, n_heads, head_dim]
         q = q.view(batch_size, seq_len, self.n_heads, self.head_dim)

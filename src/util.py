@@ -58,6 +58,8 @@ class Singleton(type):
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
+def is_autocast_enabled(device: "torch.device") -> bool:
+    return not is_device_cpu(device.type)
 
 def is_rank_0():
     import torch.distributed as dist
