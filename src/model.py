@@ -295,6 +295,11 @@ class TransformerMultiHeadAttention(nn.Module):
         q = self.q_proj(input_query)
         k = self.k_proj(input_key)
         v = self.v_proj(input_value)
+        target_dtype = v.dtype
+        if q.dtype != target_dtype:
+            q = q.to(target_dtype)
+        if k.dtype != target_dtype:
+            k = k.to(target_dtype)
         # Reshape to split heads: [batch, seq, d_model] -> [batch, seq, n_heads, head_dim]
         q = q.view(batch_size, seq_len, self.n_heads, self.head_dim)
         k = k.view(batch_size, seq_len, self.n_heads, self.head_dim)
