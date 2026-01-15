@@ -57,7 +57,7 @@ class DattaBotModel(nn.Module):
         self.final_norm = RMSNorm(dim=self.d_model)
         self.gradient_checkpointing = (
             self.config.neural_net.gradient_checkpointing
-            and device.type != "xla"
+            and device.type != "xla" and not device.type.startswith("xla")
         )
         if self.gradient_checkpointing:
             self._enable_gradient_checkpointing()
