@@ -156,7 +156,7 @@ def detect_num_devices() -> dict:
         # Hard signal: TPU runtime explicitly enabled
         if os.environ.get("PJRT_DEVICE") == "TPU":
             # forces runtime init
-            _ = xm.xla_device()  
+            _ = xm.xla_device()
             # best effort world size detection
             try:
                 count = xm.xrt_world_size()

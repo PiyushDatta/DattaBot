@@ -227,13 +227,30 @@ def get_device_info() -> dict:
     else:
         # Check for TPU (requires torch_xla)
         try:
+            import os
             import torch_xla.core.xla_model as xm
-
-            device_info["device"] = "xla"
-            device_info["backend"] = "tpu"
-            device_info["device_name"] = "TPU"
-            device_info["device_count"] = xm.xrt_world_size()
-            return device_info
+            # Hard signal: TPU runtime explicitly enabled
+            if os.environ.get("PJRT_DEVICE") == "TPU":
+                # forces runtime init
+                _ = xm.xla_device()
+                # best effort world size detection
+                try:
+                    count = xm.xrt_world_size()
+                    if count == 0:
+                        raise RuntimeError
+                except Exception:
+                    # fallback, visible XLA devices
+                    visible = os.environ.get("XLA_VISIBLE_DEVICES")
+                    if visible:
+                        count = len(visible.split(","))
+                    else:
+                        # Single-process TPU (still valid)
+                        count = 1
+                device_info["device"] = "xla"
+                device_info["backend"] = "tpu"
+                device_info["device_name"] = "TPU"
+                device_info["device_count"] = count
+                return device_info
         except ImportError:
             pass
 

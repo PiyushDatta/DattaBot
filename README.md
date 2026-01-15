@@ -2,7 +2,7 @@
 
 A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try other approaches, like doing it in rust, if it serves value.
 
-# How to install and setup
+# How to install and setup (NVIDIA/AMD/APPLE)
 
 1. Make sure you have `uv` installed
     - https://docs.astral.sh/uv/getting-started/installation/#installation-methods
@@ -19,6 +19,27 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
     - `uv pip install -r pyproject.toml`
 5. Download the weights
     - `git clone https://huggingface.co/datapi/dattabot-weights`
+
+# How to install and setup (TPU)
+1. Download torch, torch_xla, and dependencies
+    - `pip install torch torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html`
+    - `pip install hydra-core`
+    - `pip install tiktoken`
+    ```
+    gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="sudo apt-get update && sudo apt-get install libopenblas-dev -y && pip install numpy"
+
+    gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="pip install torch torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html"
+
+    gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="pip install hydra-core && pip install tiktoken && pip install tqdm && pip install safetensors && pip install psutil && pip install wandb"
+    ```
+2. Download the weights
+``` 
+gcloud compute tpus tpu-vm ssh ${TPU_NAME} \
+  --zone=${ZONE} \
+  --project=${PROJECT_ID} \
+  --worker=all \
+  --command="cd ~/DattaBot && git clone https://oauth2:${HF_TOKEN}@huggingface.co/datapi/dattabot-weights"
+```
 
 # How to interact with bot (run either of them) via client
 
