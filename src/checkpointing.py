@@ -542,7 +542,10 @@ def load_agent(
 
         paths = _get_checkpoint_paths(checkpoint_path)
         # Load model state from safetensors
-        model_state = load_safetensors(str(paths["model"]), device=device.index)
+        model_state = load_safetensors(
+            str(paths["model"]),
+            device="cpu"
+        )
         _load_model_state(model, model_state, device, strict)
         logger.info("Model weights loaded successfully")
         # Load optimizer state if available
