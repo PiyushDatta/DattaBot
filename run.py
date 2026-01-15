@@ -155,21 +155,7 @@ def detect_num_devices() -> dict:
         import torch_xla.core.xla_model as xm
         # Hard signal: TPU runtime explicitly enabled
         if os.environ.get("PJRT_DEVICE") == "TPU":
-            # forces runtime init
-            _ = xm.xla_device()
-            # best effort world size detection
-            try:
-                count = xm.xrt_world_size()
-                if count == 0:
-                    raise RuntimeError
-            except Exception:
-                # fallback, visible XLA devices
-                visible = os.environ.get("XLA_VISIBLE_DEVICES")
-                if visible:
-                    count = len(visible.split(","))
-                else:
-                    # Single-process TPU (still valid)
-                    count = 1
+            count = 2
             return {
                 "device": "tpu",
                 "count": count,

@@ -113,14 +113,9 @@ def setup_torch_dist_init():
     # --------------------
     # TPU (PJRT / torch_xla)
     # --------------------
+    # NOTHING to initialize here
     if os.environ.get("PJRT_DEVICE") == "TPU":
-        import torch_xla.core.xla_model as xm
-        # TPU runtime is already initialized by launcher
-        device = xm.xla_device()
-        print(
-            f"[setup_torch_dist_init] TPU distributed ready "
-            f"(rank={xm.get_ordinal()}, world_size={xm.world_size()})"
-        )
+        print("[setup_torch_dist_init] TPU selected (worker init deferred).")
         return
 
     # --------------------
@@ -213,34 +208,12 @@ def get_device_info() -> dict:
         return device_info
     else:
         # Check for TPU (requires torch_xla)
-        try:
-            import os
-            import torch_xla.core.xla_model as xm
-            # Hard signal: TPU runtime explicitly enabled
-            if os.environ.get("PJRT_DEVICE") == "TPU":
-                # forces runtime init
-                _ = xm.xla_device()
-                # best effort world size detection
-                try:
-                    count = xm.xrt_world_size()
-                    if count == 0:
-                        raise RuntimeError
-                except Exception:
-                    # fallback, visible XLA devices
-                    visible = os.environ.get("XLA_VISIBLE_DEVICES")
-                    if visible:
-                        count = len(visible.split(","))
-                    else:
-                        # Single-process TPU (still valid)
-                        count = 1
-                device_info["device"] = "xla"
-                device_info["backend"] = "tpu"
-                device_info["device_name"] = "TPU"
-                device_info["device_count"] = count
-                return device_info
-        except ImportError:
-            pass
-
+        if os.environ.get("PJRT_DEVICE") == "TPU":
+            device_info["device"] = "xla"
+            device_info["backend"] = "tpu"
+            device_info["device_name"] = "TPU"
+            device_info["device_count"] = 2
+            return device_info
     return device_info
 
 
