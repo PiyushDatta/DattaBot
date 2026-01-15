@@ -106,67 +106,59 @@ def setup_torch_dist_init():
     import torch
     import torch.distributed as dist
     from datetime import timedelta
+
     if not dist.is_available() or dist.is_initialized():
         return
-    # torchrun / XLA launcher detection
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    if world_size <= 1:
-        print("[setup_torch_dist_init] Single-process execution.")
-        return
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
     # --------------------
-    # TPU (XLA)
+    # TPU (PJRT / torch_xla)
     # --------------------
     try:
         import torch_xla.core.xla_model as xm
-        import torch_xla.distributed.xla_backend as xla_backend
 
-        if xm.xrt_world_size() > 1:
-            dist.init_process_group(
-                backend="xla",
-                init_method="xla://",
-                timeout=timedelta(seconds=3600),
-            )
+        devices = xm.get_xla_supported_devices()
+        if devices:
+            # torch_xla already initializes distributed
             device = xm.xla_device()
-            xm.mark_step()
             print(
-                f"[setup_torch_dist_init] TPU distributed initialized "
-                f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
+                f"[setup_torch_dist_init] TPU distributed ready "
+                f"(rank={xm.get_ordinal()}, world_size={xm.world_size()})"
             )
             return
     except ImportError:
         pass
+
     # --------------------
     # CUDA / ROCm
     # --------------------
     if torch.cuda.is_available():
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
-        backend = "nccl"
         os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
-
         dist.init_process_group(
-            backend=backend,
+            backend="nccl",
             timeout=timedelta(seconds=3600),
         )
-
         device = torch.device(f"cuda:{local_rank}")
-        dist_barrier(device)
+        dist.barrier()
         print(
             f"[setup_torch_dist_init] CUDA/ROCm distributed initialized "
             f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
         )
         return
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        print("[setup_torch_dist_init] Single-process execution.")
+        return
     # --------------------
     # CPU / Apple MPS
     # --------------------
-    backend = "gloo"
     dist.init_process_group(
-        backend=backend,
+        backend="gloo",
         timeout=timedelta(seconds=3600),
     )
     device = torch.device("cpu")
-    dist_barrier(device)
+    dist.barrier()
     print(
         f"[setup_torch_dist_init] Gloo distributed initialized "
         f"(rank={dist.get_rank()}, world_size={dist.get_world_size()})"
