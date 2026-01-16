@@ -52,6 +52,7 @@ class Agent:
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         self.autocast_dtype = torch.bfloat16
         # Setup compute.
+        self.device_info = get_device_info()
         self._initialize_compute()
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
@@ -64,7 +65,11 @@ class Agent:
         # Initialize AMP scaler.
         # Reduce memory consumption and improve training speed.
         # https://arxiv.org/abs/1710.03740
-        self.scaler = torch.amp.GradScaler(device=self.agent_device)
+        if self.device_info["backend"] == "xla":
+            # No scaler needed for TPU
+            self.scaler = None
+        else:
+            self.scaler = torch.amp.GradScaler(device=self.agent_device)
         # Initialize AdaptiveLogSoftmaxWithLoss.
         # Vocab size is huge and increases the memory during forward pass by a
         # lot, to reduce the memory overhead we use AdaptiveLogSoftmaxWithLoss
@@ -155,6 +160,11 @@ class Agent:
         # Convert entire model to consistent dtype after loading
         if is_autocast_enabled(self.agent_device):
             self.model = self.model.to(dtype=self.autocast_dtype)
+            # Also convert optimizer state if reloading
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(dtype=self.autocast_dtype)
             self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
         else:
             self.model = self.model.to(dtype=self.tensor_dtype)
@@ -177,7 +187,6 @@ class Agent:
     def _initialize_compute(self):
         """Main entry point for all compute setup."""
         # Detect available hardware
-        self.device_info = get_device_info()
         self.logger.info(
             f"Detected backend: {self.device_info['backend']}, "
             f"device: {self.device_info['device_name']}, "
@@ -686,6 +695,10 @@ class Agent:
             if self.scaler:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+            elif self.device_info["backend"] == "xla":
+                # For TPUs
+                import torch_xla.core.xla_model as xm
+                xm.optimizer_step(self.optimizer)
             else:
                 self.optimizer.step()
             # Update learning rate if using a scheduler.

@@ -464,6 +464,10 @@ def save_agent(
     checkpoint_path = Path(checkpoint_dir)
     logger.info(f"Saving checkpoint to {checkpoint_path}")
     try:
+        if device.type == "xla":
+            # For TPU sync before saving
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
         # Extract state dicts (all ranks participate for FSDP)
         model_state = _extract_model_state(model, device)
         optimizer_state = _extract_optimizer_state(model, optimizer, device)
