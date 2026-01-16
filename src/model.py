@@ -28,9 +28,15 @@ from torch import (
 )
 from torch.nn.attention import sdpa_kernel, SDPBackend
 
+
 def _is_gradient_checkpointing_enabled(device: torch_device) -> bool:
     config = get_agent_config()
-    return config.neural_net.gradient_checkpointing and device.type != "xla" and not device.type.startswith("xla")
+    return (
+        config.neural_net.gradient_checkpointing
+        and device.type != "xla"
+        and not device.type.startswith("xla")
+    )
+
 
 # Transformer Model.
 class DattaBotModel(nn.Module):
@@ -58,7 +64,9 @@ class DattaBotModel(nn.Module):
             n_layers=self.n_layers, d_model=self.d_model, device=self.device
         )
         self.final_norm = RMSNorm(dim=self.d_model)
-        self.gradient_checkpointing = _is_gradient_checkpointing_enabled(device=self.device)
+        self.gradient_checkpointing = _is_gradient_checkpointing_enabled(
+            device=self.device
+        )
         if self.gradient_checkpointing:
             self._enable_gradient_checkpointing()
 

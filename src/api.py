@@ -141,7 +141,7 @@ class DattaBotAPI:
                             output_file=output_file,
                         )
                     elif not is_rank_0():
-                        self.logger.warn(
+                        self.logger.warning(
                             f"Not rank 0 gpu, not running eval. Exiting now."
                         )
                     else:

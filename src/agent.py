@@ -10,7 +10,11 @@ import torch.multiprocessing as mp
 import tqdm
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
-from src.checkpointing import load_agent, save_agent
+from src.checkpointing import (
+    load_agent,
+    load_optimizer_state_from_checkpoint,
+    save_agent,
+)
 from src.communication_mgr import DattaBotCommunicationManager
 from src.data_loader import DattabotDataBuilder
 from src.gpu_profiler import BackgroundGPUProfiler
@@ -65,7 +69,10 @@ class Agent:
         # Initialize AMP scaler.
         # Reduce memory consumption and improve training speed.
         # https://arxiv.org/abs/1710.03740
-        if self.device_info["backend"] == "xla":
+        if (
+            self.device_info["backend"] == "xla"
+            or self.autocast_dtype == torch.bfloat16
+        ):
             # No scaler needed for TPU
             self.scaler = None
         else:
@@ -105,6 +112,13 @@ class Agent:
         self.logger.info(
             f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
         )
+        # Convert entire model to consistent dtype after loading
+        if is_autocast_enabled(self.agent_device):
+            self.model = self.model.to(dtype=self.autocast_dtype)
+            self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
+        else:
+            self.model = self.model.to(dtype=self.tensor_dtype)
+            self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
         # Wrap with distributed layer if we have multiple gpus.
         if dist.is_available() and torch.cuda.device_count() > 1:
             if self.config.agent.fsdp:
@@ -128,6 +142,20 @@ class Agent:
         if self.device_info["backend"] == "cuda":
             self.model.cuda()
 
+        # Validate weights file path and load model weights.
+        self.weights_fname = self.config.agent.weights_file_name
+        weights_dir = os.path.dirname(self.weights_fname)
+        if weights_dir and not os.path.exists(weights_dir):
+            raise FileNotFoundError(f"Weights path does not exist: {weights_dir}")
+        load_agent(
+            model=self.model,
+            checkpoint_dir=self.weights_fname,
+            device=self.agent_device,
+            loss_fn=self.loss_fn,
+            optimizer=None,
+        )
+        # Ensure loss_fn has correct dtype after loading checkpoint
+        self.loss_fn = self.loss_fn.to(dtype=self.autocast_dtype)
         # TODO(PiyushDatta): Try and get Muon optimizer to work.
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -143,32 +171,16 @@ class Agent:
             pct_start=0.3,
             anneal_strategy="cos",
         )
-        # Validate weights file path and load model weights.
-        self.weights_fname = self.config.agent.weights_file_name
-        weights_dir = os.path.dirname(self.weights_fname)
-        if weights_dir and not os.path.exists(weights_dir):
-            raise FileNotFoundError(f"Weights path does not exist: {weights_dir}")
-        load_agent(
-            model=self.model,
+        target_dtype = (
+            self.autocast_dtype
+            if is_autocast_enabled(self.agent_device)
+            else self.tensor_dtype
+        )
+        self.optimizer = load_optimizer_state_from_checkpoint(
             checkpoint_dir=self.weights_fname,
-            device=self.agent_device,
-            loss_fn=self.loss_fn,
+            target_dtype=target_dtype,
             optimizer=self.optimizer,
         )
-        # Ensure loss_fn has correct dtype after loading checkpoint
-        self.loss_fn = self.loss_fn.to(dtype=self.autocast_dtype)
-        # Convert entire model to consistent dtype after loading
-        if is_autocast_enabled(self.agent_device):
-            self.model = self.model.to(dtype=self.autocast_dtype)
-            # Also convert optimizer state if reloading
-            for state in self.optimizer.state.values():
-                for k, v in state.items():
-                    if isinstance(v, torch.Tensor):
-                        state[k] = v.to(dtype=self.autocast_dtype)
-            self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
-        else:
-            self.model = self.model.to(dtype=self.tensor_dtype)
-            self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
         # Setup inference engine when needed.
         self.inference_engine = None
         self.use_moe = self.config.neural_net.use_moe
@@ -698,6 +710,7 @@ class Agent:
             elif self.device_info["backend"] == "xla":
                 # For TPUs
                 import torch_xla.core.xla_model as xm
+
                 xm.optimizer_step(self.optimizer)
             else:
                 self.optimizer.step()

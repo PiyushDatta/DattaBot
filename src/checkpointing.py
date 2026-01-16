@@ -220,6 +220,30 @@ def _load_optimizer_state(
         optimizer.load_state_dict(state_dict)
 
 
+def load_optimizer_state_from_checkpoint(
+    checkpoint_dir: str, target_dtype: torch.dtype, optimizer
+) -> None:
+    """Load optimizer state from checkpoint after optimizer is created."""
+    from pathlib import Path
+
+    logger = get_logger()
+    checkpoint_path = Path(checkpoint_dir)
+    paths = _get_checkpoint_paths(checkpoint_path)
+    optimizer_path = paths["optimizer"]
+    if not optimizer_path.exists():
+        logger.warning("No optimizer state found in checkpoint")
+        return optimizer
+    optimizer_state = torch.load(optimizer_path, map_location="cpu")
+    # Convert state tensors to match model dtype if needed
+    for state in optimizer_state.get("state", {}).values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                state[k] = v.to(dtype=target_dtype)
+    optimizer.load_state_dict(optimizer_state)
+    logger.debug("Optimizer state loaded successfully")
+    return optimizer
+
+
 # ============================================================================
 # State Dict Key Cleaning
 # ============================================================================
@@ -467,6 +491,7 @@ def save_agent(
         if device.type == "xla":
             # For TPU sync before saving
             import torch_xla.core.xla_model as xm
+
             xm.mark_step()
         # Extract state dicts (all ranks participate for FSDP)
         model_state = _extract_model_state(model, device)
@@ -546,10 +571,7 @@ def load_agent(
 
         paths = _get_checkpoint_paths(checkpoint_path)
         # Load model state from safetensors
-        model_state = load_safetensors(
-            str(paths["model"]),
-            device="cpu"
-        )
+        model_state = load_safetensors(str(paths["model"]), device="cpu")
         _load_model_state(model, model_state, device, strict)
         logger.info("Model weights loaded successfully")
         # Load optimizer state if available

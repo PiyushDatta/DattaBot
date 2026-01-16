@@ -73,9 +73,7 @@ def cleanup_devices():
             timeout=5,
         )
         pids = [
-            int(pid.strip())
-            for pid in result.stdout.strip().split("\n")
-            if pid.strip()
+            int(pid.strip()) for pid in result.stdout.strip().split("\n") if pid.strip()
         ]
         if pids:
             print(f"Found {len(pids)} GPU processes to clean up...")
@@ -188,7 +186,9 @@ def detect_num_devices() -> dict:
     # --------------------
     try:
         import os
+
         import torch_xla.core.xla_model as xm
+
         # Hard signal: TPU runtime explicitly enabled
         if os.environ.get("PJRT_DEVICE") == "TPU":
             count = 2
@@ -206,13 +206,16 @@ def detect_num_devices() -> dict:
         "count": 0,
     }
 
+
 def process_api_cmd(api_cmd: str, api_args: str):
     device_info = detect_num_devices()
     device = device_info["device"]
     num_devices = device_info["count"]
     nnodes = int(os.environ.get("NNODES", "1"))
     node_rank = int(os.environ.get("NODE_RANK", "0"))
-    print(f"Processing API command: {api_cmd} with args: {api_args}, device: {device}, num_devices: {num_devices}")
+    print(
+        f"Processing API command: {api_cmd} with args: {api_args}, device: {device}, num_devices: {num_devices}"
+    )
     # --------------------
     # Distributed execution (CUDA / ROCm / TPU)
     # --------------------

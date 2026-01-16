@@ -58,8 +58,10 @@ class Singleton(type):
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
+
 def is_autocast_enabled(device: "torch.device") -> bool:
     return not is_device_cpu(device.type)
+
 
 def is_rank_0():
     import torch.distributed as dist
@@ -166,12 +168,14 @@ def dist_barrier(device: "torch.device") -> None:
     - TPU/XLA: NO-OP (XLA uses implicit SPMD synchronization)
     """
     import torch.distributed as dist
+
     if not dist.is_available() or not dist.is_initialized():
         return
     # TPU/XLA: torch.distributed barriers will deadlock
     if device.type == "xla":
         return
     from src.logger import get_logger
+
     logger = get_logger()
     rank = dist.get_rank()
     logger.debug(
