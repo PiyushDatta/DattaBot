@@ -24,6 +24,7 @@ import tqdm
 from src.agent_components import DattaBotAgentComponents
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
+from src.checkpointing import DattaBotCheckpointManager, get_checkpoint_manager
 from src.logger import get_logger
 from src.tokenizer import DattaBotTokenizer
 from src.util import is_autocast_enabled, is_rank_0
@@ -151,6 +152,7 @@ class DattaBotTrainingEngine:
         self,
         device: torch.device,
         tokenizer: DattaBotTokenizer,
+        orig_model: nn.Module,
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         components: DattaBotAgentComponents,
@@ -158,34 +160,43 @@ class DattaBotTrainingEngine:
         metric_tracker=None,
         gpu_profiler=None,
         d_model: int = 1024,
-        save_checkpoint_fn: Optional[Callable] = None,
     ):
-        self.model = model
         self.device = device
-        self.config = get_agent_config()
         self.tokenizer = tokenizer
+        self.orig_model = orig_model
+        self.model = model
+        self.config = get_agent_config()
         self.metric_tracker = metric_tracker
         self.gpu_profiler = gpu_profiler
         self.max_response_tokens = components.max_response_tokens
+        self.use_moe = components.use_moe
         self.d_model = d_model
         self.logger = get_logger()
         self.autocast_dtype = autocast_dtype
         self.lr = self.config.agent.lr
-
         # Training components
         self.loss_fn = components.loss_fn
         self.lr_scheduler = components.lr_scheduler
         self.optimizer = optimizer
         self.scaler = components.scaler
-
-        # Callback for saving checkpoints
-        self.save_checkpoint_fn = save_checkpoint_fn
-
+        # Manager for saving checkpoints
+        self.chkpt_manager: DattaBotCheckpointManager = get_checkpoint_manager()
         # Mode-specific callbacks
         self._pre_epoch_hooks: dict[TrainingMode, list[Callable]] = {}
         self._post_epoch_hooks: dict[TrainingMode, list[Callable]] = {}
         self._pre_step_hooks: dict[TrainingMode, list[Callable]] = {}
         self._post_step_hooks: dict[TrainingMode, list[Callable]] = {}
+        # Training state (reset before each training run)
+        self._reset_training_state()
+
+    def _reset_training_state(self) -> None:
+        """Reset training state before each training run."""
+        self.current_epoch = 0
+        self.global_step = 0
+        self.tokens_processed = 0
+        self.avg_train_loss = 0.0
+        self.avg_val_loss = 0.0
+        self.best_val_loss = float("inf")
 
     # =========================================================================
     # Main Training Entry Point
@@ -211,18 +222,11 @@ class DattaBotTrainingEngine:
             TrainingResult containing all training metrics and response
         """
         self.logger.info(f"Starting {mode.display_name} process.")
-
+        # Reset training state
+        self._reset_training_state()
         response = DattaBotAPIResponse()
         response.text = f"Starting {mode.display_name}."
         train_interrupted = False
-
-        # Training state
-        avg_train_loss = 0.0
-        avg_val_loss = 0.0
-        tokens_processed = 0
-        total_steps = 0
-        best_val_loss = float("inf")
-
         # Config values
         max_epochs = self.config.agent.max_training_num_epochs
         max_train_tokens = self.config.agent.max_train_tokens
@@ -230,118 +234,98 @@ class DattaBotTrainingEngine:
         num_train_batches = self.config.agent.num_batches_train_every_epoch
         num_val_batches = self.config.agent.num_batches_val_every_epoch
         ckpt_interval = self.config.agent.checkpoint_interval_train_steps
-
         # Determine validation mode
         val_mode = self._get_validation_mode(mode)
-
         train_start_time = time.time()
 
         try:
             self._log_training_start(
                 train_dataloader, vocab, num_train_batches, num_val_batches
             )
-
             for epoch in range(max_epochs):
-                curr_epoch = epoch + 1
-                self.logger.debug(f"\nEpoch {curr_epoch}/{max_epochs}")
-
+                self.current_epoch = epoch + 1
+                self.logger.debug(f"\nEpoch {self.current_epoch}/{max_epochs}")
                 # Update distributed samplers
-                self._update_samplers(train_dataloader, val_dataloader, curr_epoch)
-
+                self._update_samplers(
+                    train_dataloader, val_dataloader, self.current_epoch
+                )
                 # === Training Phase ===
                 if self.gpu_profiler:
                     self.gpu_profiler.log_gpu_memory("Training - before train epoch")
-
                 train_result = self.run_epoch(
                     mode=mode,
-                    epoch_num=curr_epoch,
+                    epoch_num=self.current_epoch,
                     dataloader=train_dataloader,
                     num_batches=num_train_batches,
                 )
-
                 if self.gpu_profiler:
                     self.gpu_profiler.log_gpu_memory("Training - after train epoch")
-
                 # Update metrics
-                total_steps += train_result.total_steps
-                tokens_processed += train_result.total_tokens
+                self.global_step += train_result.total_steps
+                self.tokens_processed += train_result.total_tokens
                 response.num_train_tokens_processed += train_result.total_tokens
                 response.num_train_batches += train_result.total_steps
-                avg_train_loss = train_result.avg_loss
-
+                self.avg_train_loss = train_result.avg_loss
                 elapsed = time.time() - train_start_time
                 self.logger.debug(
-                    f"[Epoch {curr_epoch}] avg_train_loss={avg_train_loss:.4f}, "
-                    f"tokens_processed={tokens_processed:,}"
+                    f"[Epoch {self.current_epoch}] avg_train_loss={self.avg_train_loss:.4f}, "
+                    f"tokens_processed={self.tokens_processed:,}"
                 )
-
                 # Check early stop conditions
                 should_stop, stop_reason = self._check_stop_conditions(
-                    tokens_processed, max_train_tokens, elapsed, max_train_time
+                    self.tokens_processed, max_train_tokens, elapsed, max_train_time
                 )
                 if should_stop:
                     self.logger.info(stop_reason)
                     break
-
                 # === Validation Phase ===
                 val_result = self.run_epoch(
                     mode=val_mode,
-                    epoch_num=curr_epoch,
+                    epoch_num=self.current_epoch,
                     dataloader=val_dataloader,
                     num_batches=num_val_batches,
                 )
-
-                tokens_processed += val_result.total_tokens
+                self.tokens_processed += val_result.total_tokens
                 response.num_val_tokens_processed += val_result.total_tokens
                 response.num_val_batches += val_result.total_steps
-                avg_val_loss = val_result.avg_loss
-
+                self.avg_val_loss = val_result.avg_loss
                 self.logger.debug(
-                    f"[Epoch {curr_epoch}] avg_val_loss={avg_val_loss:.4f}"
+                    f"[Epoch {self.current_epoch}] avg_val_loss={self.avg_val_loss:.4f}"
                 )
-
                 # Log epoch metrics
-                self._log_epoch_metrics(train_result, val_result, tokens_processed)
-
+                self._log_epoch_metrics(train_result, val_result, self.tokens_processed)
                 # Save best model
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    self._save_checkpoint("best")
+                if self.avg_val_loss < self.best_val_loss:
+                    self.best_val_loss = self.avg_val_loss
                     self.logger.info(
-                        f"New best model saved! val_loss={avg_val_loss:.4f}"
+                        f"New best model! val_loss={self.avg_val_loss:.4f}"
                     )
-
+                    self._save_checkpoint(checkpoint_type="best")
                 # Periodic checkpoint
-                if total_steps % ckpt_interval == 0:
-                    self._save_checkpoint("periodic")
-                    self.logger.info(f"Checkpoint saved at step {total_steps}")
-
+                if self.global_step % ckpt_interval == 0:
+                    self._save_checkpoint(checkpoint_type="periodic")
             # Training complete
             response.text = self._build_success_message(response)
-
         except KeyboardInterrupt:
             train_interrupted = True
             response.text = "Training interrupted by user (ctrl+c)."
             self.logger.error(response.text)
-
         except Exception as e:
             train_interrupted = True
             response.text = f"Training stopped unexpectedly: {e}"
             self.logger.error(response.text)
             self.logger.error(f"Traceback:\n{traceback.format_exc()}")
-
         finally:
             # Always save final checkpoint
-            self._save_checkpoint("final")
+            self._save_checkpoint(checkpoint_type="final")
 
         total_time = time.time() - train_start_time
-
         return TrainingResult(
             response=response,
-            train_loss=avg_train_loss,
-            val_loss=avg_val_loss,
-            total_steps=total_steps,
-            total_tokens=tokens_processed,
+            train_loss=self.avg_train_loss,
+            val_loss=self.avg_val_loss,
+            total_steps=self.global_step,
+            total_tokens=self.tokens_processed,
             total_time=total_time,
             interrupted=train_interrupted,
             vocab=vocab,
@@ -420,9 +404,17 @@ class DattaBotTrainingEngine:
         )
 
     def _save_checkpoint(self, checkpoint_type: str) -> None:
-        """Save a checkpoint using the provided callback."""
-        if self.save_checkpoint_fn:
-            self.save_checkpoint_fn()
+        """Save a checkpoint for the model."""
+        # Update bundle state from training engine state
+        self.chkpt_manager.bundle.update_state(
+            epoch=self.current_epoch,
+            global_step=self.global_step,
+            tokens_processed=self.tokens_processed,
+            train_loss=self.avg_train_loss,
+            val_loss=self.avg_val_loss,
+        )
+        self.chkpt_manager.save_agent()
+        self.logger.info(f"Saved model ({checkpoint_type}) at step {self.global_step}")
 
     def _build_success_message(self, response: DattaBotAPIResponse) -> str:
         """Build success message for completed training."""
@@ -448,28 +440,22 @@ class DattaBotTrainingEngine:
         """Run a single epoch in the specified mode."""
         start_time = time.time()
         is_training = mode.is_training
-
         self._run_hooks("pre_epoch", mode, epoch_num=epoch_num)
-
         if is_training:
             self.model.train()
         else:
             self.model.eval()
-
         # Initialize accumulators
         accumulated_loss = torch.tensor(0.0, device=self.device)
         accumulated_main_loss = torch.tensor(0.0, device=self.device)
         accumulated_moe_loss = torch.tensor(0.0, device=self.device)
         accumulated_tokens = torch.tensor(0, device=self.device)
-
         total_loss = 0.0
         total_main_loss = 0.0
         total_moe_loss = 0.0
         total_steps = 0
         total_tokens = 0
-
         sync_interval = self.config.agent.training_sync_interval
-
         progress_bar = tqdm.tqdm(
             enumerate(dataloader),
             total=num_batches,
@@ -477,25 +463,20 @@ class DattaBotTrainingEngine:
             leave=True,
             disable=not is_rank_0(),
         )
-
         context = torch.no_grad() if not is_training else nullcontext()
 
         with context:
             for batch_idx, batch in progress_bar:
                 if batch_idx >= num_batches:
                     break
-
                 self._run_hooks("pre_step", mode, epoch_num=epoch_num, step=batch_idx)
-
                 # Prepare batch
                 input_ids = batch[0].to(self.device)
                 labels = batch[1].to(self.device)
                 batch_size = input_ids.shape[0]
                 attention_pad_mask = self._get_attention_pad_mask(input_ids)
-
                 if is_training:
                     self.optimizer.zero_grad()
-
                 # Forward pass
                 with torch.autocast(
                     device_type=self.device.type,
@@ -506,14 +487,12 @@ class DattaBotTrainingEngine:
                         input_ids=input_ids,
                         attention_pad_mask=attention_pad_mask,
                     )
-
                     padding_mask = labels != self.tokenizer.pad_token_id
                     main_loss, moe_loss = self._compute_loss(
                         outputs=logits,
                         targets=labels,
                         mask=padding_mask,
                     )
-
                     if moe_loss is not None:
                         loss = (
                             main_loss
@@ -521,14 +500,12 @@ class DattaBotTrainingEngine:
                         )
                     else:
                         loss = main_loss
-
                 # Backward pass (training only)
                 if is_training:
                     if self.scaler:
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
-
                     if self.config.agent.max_grad_norm:
                         if self.scaler:
                             self.scaler.unscale_(self.optimizer)
@@ -536,7 +513,6 @@ class DattaBotTrainingEngine:
                             self.model.parameters(),
                             self.config.agent.max_grad_norm,
                         )
-
                     if self.scaler:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -545,7 +521,6 @@ class DattaBotTrainingEngine:
                         xm.mark_step()
                     else:
                         self.optimizer.step()
-
                     if self.lr_scheduler:
                         self.lr_scheduler.step()
                 else:
@@ -559,7 +534,6 @@ class DattaBotTrainingEngine:
                 if moe_loss is not None:
                     accumulated_moe_loss += moe_loss.detach()
                 accumulated_tokens += padding_mask.sum()
-
                 # Sync periodically
                 if total_steps % sync_interval == 0:
                     total_loss, total_main_loss, total_moe_loss, total_tokens = (
@@ -571,17 +545,14 @@ class DattaBotTrainingEngine:
                             total_steps,
                         )
                     )
-
                     avg_loss = total_loss / total_steps
                     perplexity = torch.exp(torch.tensor(avg_loss)).item()
-
                     progress_bar.set_postfix(
                         {
                             "loss": f"{avg_loss:.4f}",
                             "ppl": f"{perplexity:.2f}",
                         }
                     )
-
                 self._run_hooks(
                     "post_step", mode, epoch_num=epoch_num, step=batch_idx, loss=loss
                 )
@@ -594,13 +565,11 @@ class DattaBotTrainingEngine:
             accumulated_tokens,
             total_steps,
         )
-
         avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
         avg_main_loss = (
             total_main_loss / total_steps if total_steps > 0 else float("inf")
         )
         avg_moe_loss = total_moe_loss / total_steps if total_steps > 0 else 0.0
-
         # Distributed sync
         if dist.is_available() and dist.is_initialized():
             loss_tensor = torch.tensor(
@@ -612,11 +581,8 @@ class DattaBotTrainingEngine:
             total_steps = int(total_steps)
             total_tokens = int(total_tokens)
             avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
-
         elapsed_time = time.time() - start_time
-
         self._run_hooks("post_epoch", mode, epoch_num=epoch_num)
-
         return EpochResult(
             mode=mode,
             epoch_num=epoch_num,
@@ -664,29 +630,44 @@ class DattaBotTrainingEngine:
     def _compute_loss(
         self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None
     ) -> tuple[Tensor, Optional[Tensor]]:
+        """
+        Compute loss using loss function.
+        Args:
+            outputs: Tensor of shape (batch_size, seq_len, d_model)
+            targets: Tensor of shape (batch_size, seq_len)
+            mask: Tensor of shape (batch_size, seq_len)
+        Returns:
+            main_loss: scalar tensor (cross-entropy loss)
+            moe_loss: scalar tensor or None (load balancing loss)
+        """
+        # Flatten to (batch*seq_len, d_model).
         batch_size, seq_len, d_model = outputs.size()
         outputs_flat = outputs.view(batch_size * seq_len, d_model)
         targets_flat = targets.view(batch_size * seq_len)
-
         if mask is not None:
             mask_flat = mask.view(batch_size * seq_len)
             outputs_flat = outputs_flat[mask_flat]
             targets_flat = targets_flat[mask_flat]
-
         outputs_flat = outputs_flat.to(self.device).float()
         targets_flat = targets_flat.to(self.device)
-
+        # Main cross-entropy loss.
         if outputs_flat.numel() == 0:
             main_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         else:
-            _, main_loss = self.loss_fn(outputs_flat, targets_flat)
-
+            main_loss = self.loss_fn(outputs_flat, targets_flat).loss
+        # MoE auxiliary loss (only during training).
         moe_loss = None
-        if self.config.neural_net.use_moe and hasattr(
-            self.model, "get_load_balancing_loss"
-        ):
-            moe_loss = self.model.get_load_balancing_loss()
-
+        if self.use_moe:
+            if isinstance(
+                self.model,
+                (
+                    torch.nn.DataParallel,
+                    torch.nn.parallel.DistributedDataParallel,
+                ),
+            ):
+                moe_loss = self.model.module.get_load_balancing_loss()
+            else:
+                moe_loss = self.model.get_load_balancing_loss()
         return main_loss, moe_loss
 
     def _sync_metrics(
@@ -703,3 +684,12 @@ class DattaBotTrainingEngine:
             accumulated_moe_loss.item(),
             int(accumulated_tokens.item()),
         )
+
+    def _profile_training(self, num_steps=20, log_dir: Optional[str] = None):
+        """
+        Create an AgentProfiler and run the training profiler.
+        """
+        from src.agent_profiler import AgentProfiler
+
+        profiler = AgentProfiler(self, log_dir=log_dir)
+        return profiler.profile_training(num_steps=num_steps)

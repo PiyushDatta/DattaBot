@@ -18,11 +18,7 @@ import torch.multiprocessing as mp
 from src.agent_components import DattaBotAgentComponentFactory, DattaBotAgentComponents
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
-from src.checkpointing import (
-    load_agent,
-    load_optimizer_state_from_checkpoint,
-    save_agent,
-)
+from src.checkpointing import DattaBotCheckpointManager, get_checkpoint_manager
 from src.communication_mgr import DattaBotCommunicationManager
 from src.data_loader import DattabotDataBuilder
 from src.gpu_profiler import BackgroundGPUProfiler
@@ -72,7 +68,7 @@ class Agent:
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
         # Setup model.
         self.d_model = self.config.neural_net.model_dimensions
-        self.model = self._create_model()
+        self.unwrapped_orig_model, self.model = self._create_model()
         # Setup optimizer.
         self.optimizer = self._create_optimizer()
         # Setup data loader.
@@ -89,13 +85,24 @@ class Agent:
             autocast_dtype=self.autocast_dtype,
         )
         self.components: DattaBotAgentComponents = factory.create()
-        # Load the agent and its components.
-        load_agent(
-            model=self.model,
-            checkpoint_dir=self.components.weights_dir,
-            optimizer=self.optimizer,
-            device=self.device,
+        # Configure bundle references (once)
+        self.chkpt_manager: DattaBotCheckpointManager = get_checkpoint_manager(
+            self.components.weights_dir
         )
+        self.chkpt_manager.bundle.unwrapped_model = self.unwrapped_orig_model
+        self.chkpt_manager.bundle.wrapped_model = self.model
+        self.chkpt_manager.bundle.optimizer = self.optimizer
+        self.chkpt_manager.bundle.loss_fn = self.components.loss_fn
+        self.chkpt_manager.bundle.device = self.device
+        self.chkpt_manager.bundle.agent_name = self.config.agent.agent_name
+        # Load metadata only (not model weights) to restore training state
+        metadata = self.chkpt_manager.get_metadata()
+        if metadata:
+            self.chkpt_manager.bundle.epoch = metadata.epoch
+            self.chkpt_manager.bundle.global_step = metadata.global_step
+            self.chkpt_manager.bundle.tokens_processed = metadata.tokens_processed
+            self.chkpt_manager.bundle.train_loss = metadata.train_loss
+            self.chkpt_manager.bundle.val_loss = metadata.val_loss
         # Monitoring tools.
         self.metric_tracker: MetricTracker | None = None
         self.gpu_profiler: BackgroundGPUProfiler | None = BackgroundGPUProfiler(
@@ -107,6 +114,7 @@ class Agent:
         self.training_engine = DattaBotTrainingEngine(
             device=self.device,
             tokenizer=self.tokenizer,
+            orig_model=self.unwrapped_orig_model,
             model=self.model,
             optimizer=self.optimizer,
             components=self.components,
@@ -114,7 +122,6 @@ class Agent:
             metric_tracker=self.metric_tracker,
             gpu_profiler=self.gpu_profiler,
             d_model=self.d_model,
-            save_checkpoint_fn=self._save_agent,
         )
 
     def __del__(self) -> None:
@@ -126,7 +133,7 @@ class Agent:
             self.logger.info("Destroying distributed process group...")
             dist.destroy_process_group()
 
-    def _create_model(self) -> DattaBotModel:
+    def _create_model(self) -> (DattaBotModel, DattaBotModel):
         """Create neural network model."""
         # Setup model.
         # We pass in tensor_dtype to the model, but remember we may use
@@ -149,6 +156,52 @@ class Agent:
         else:
             model = model.to(dtype=self.tensor_dtype)
             self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
+        if self.device_info["backend"] == "cuda":
+            model.cuda()
+        # Load checkpoint BEFORE distributed wrapping
+        self._load_checkpoint_into_model(model)
+        # Wrap after loading (modifies model in-place)
+        wrapped_model = self._distribute_model(model=model)
+        # Note: If using FSDP, model and wrapped_model will be the same object
+        return model, wrapped_model
+
+    def _load_checkpoint_into_model(self, model: DattaBotModel) -> None:
+        """Load checkpoint into model before wrapping."""
+        from pathlib import Path
+
+        from safetensors.torch import load_file as load_safetensors
+
+        weights_dir = Path(self.config.agent.weights_file_name)
+        model_path = weights_dir / "model.safetensors"
+
+        if not model_path.exists():
+            self.logger.info(f"No checkpoint found at {model_path}, starting fresh")
+            return
+
+        try:
+            self.logger.info(f"Loading model weights from {model_path}")
+            state_dict = load_safetensors(str(model_path), device="cpu")
+            # Clean up DDP prefix if present
+            state_dict = {
+                k.replace("module.", "", 1) if k.startswith("module.") else k: v
+                for k, v in state_dict.items()
+            }
+            # Move to correct device and dtype
+            state_dict = {
+                k: v.to(device=self.device, dtype=model.token_embedding.weight.dtype)
+                for k, v in state_dict.items()
+            }
+            incompatible = model.load_state_dict(state_dict, strict=False)
+            if incompatible.missing_keys:
+                self.logger.warning(f"Missing keys: {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                self.logger.warning(f"Unexpected keys: {incompatible.unexpected_keys}")
+            self.logger.info("Model weights loaded successfully (before wrapping)")
+        except Exception as e:
+            self.logger.error(f"Failed to load checkpoint: {e}")
+            raise
+
+    def _distribute_model(self, model) -> DattaBotModel:
         # Wrap with distributed layer if we have multiple gpus.
         if dist.is_available() and torch.cuda.device_count() > 1:
             if self.config.agent.fsdp:
@@ -169,8 +222,6 @@ class Agent:
                     output_device=self.local_rank,
                     find_unused_parameters=False,
                 )
-        if self.device_info["backend"] == "cuda":
-            model.cuda()
         return model
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
@@ -222,17 +273,6 @@ class Agent:
             f"local_rank={self.local_rank}, world_size={self.world_size}"
         )
 
-    def _save_agent(self):
-        """Helper method to save agent."""
-        save_agent(
-            model=self.model,
-            checkpoint_dir=self.components.weights_dir,
-            device=self.device,
-            optimizer=self.optimizer,
-            loss_fn=None,
-            metadata=None,
-        )
-
     def _setup_inference_engine(self):
         """Setup high-performance inference engine."""
         from src.inference_engine import DattaBotInferenceEngine
@@ -241,7 +281,7 @@ class Agent:
             self.inference_engine = DattaBotInferenceEngine(
                 model=self.model,
                 device=self.device,
-                adaptive_softmax=self.loss_fn,
+                adaptive_softmax=self.components.loss_fn,
             )
             self.logger.info("Inference engine initialized and ready for deployment!")
 
@@ -286,96 +326,6 @@ class Agent:
         else:
             self.device = "cpu"
 
-    def _compute_loss(
-        self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None
-    ) -> tuple[Tensor, Optional[Tensor]]:
-        """
-        Compute loss using loss function.
-        Args:
-            outputs: Tensor of shape (batch_size, seq_len, d_model)
-            targets: Tensor of shape (batch_size, seq_len)
-            mask: Tensor of shape (batch_size, seq_len)
-        Returns:
-            main_loss: scalar tensor (cross-entropy loss)
-            moe_loss: scalar tensor or None (load balancing loss)
-        """
-        # Flatten to (batch*seq_len, d_model).
-        batch_size, seq_len, d_model = outputs.size()
-        outputs_flat = outputs.view(batch_size * seq_len, d_model)
-        targets_flat = targets.view(batch_size * seq_len)
-        if mask is not None:
-            mask_flat = mask.view(batch_size * seq_len)
-            outputs_flat = outputs_flat[mask_flat]
-            targets_flat = targets_flat[mask_flat]
-        outputs_flat = outputs_flat.to(self.device)
-        targets_flat = targets_flat.to(self.device)
-        # Cast to float32 for loss.
-        outputs_flat = outputs_flat.float()
-        # Main cross-entropy loss.
-        loss_output = self.loss_fn(outputs_flat, targets_flat)
-        main_loss = loss_output.loss
-        # MoE auxiliary loss (only during training).
-        moe_loss = None
-        if self.training and self.use_moe:
-            if isinstance(
-                self.model,
-                (
-                    torch.nn.DataParallel,
-                    torch.nn.parallel.DistributedDataParallel,
-                ),
-            ):
-                moe_loss = self.model.module.get_load_balancing_loss()
-            else:
-                moe_loss = self.model.get_load_balancing_loss()
-        return main_loss, moe_loss
-
-    def _get_attention_pad_mask(self, input_ids: Tensor) -> Tensor:
-        """
-        Get attention pad mask.
-        Args:
-            input_ids: Tensor of shape (batch_size, seq_len)
-        Returns:
-            mask: Tensor of shape (batch, 1, seq_len, seq_len)
-        """
-        # TODO(PiyushDatta): Figure out what to do with the mask, we are padding the sequences.
-        #                    This is a temporary solution to unblock the flash attention training.
-        return None
-        # Attention mask (1 for real tokens, 0 for pad)
-        batch_size = input_ids.shape[0]
-        seq_len = input_ids.shape[1]
-        # [batch, seq_len]
-        attention_pad_mask = (input_ids != self.tokenizer.pad_token_id).to(self.device)
-        # unsqueeze to create head dim
-        # [batch, seq_len] -> [batch, 1, seq_len]
-        attention_pad_mask = attention_pad_mask.unsqueeze(1)
-        # unsqueeze again to create key/value dim
-        # [batch, 1, seq_len] -> [batch, 1, seq_len, 1]
-        attention_pad_mask = attention_pad_mask.unsqueeze(-1)
-        # expand the last dim to seq_len
-        # [batch, 1, seq_len, 1] -> [batch, 1, seq_len, seq_len]
-        attention_pad_mask = attention_pad_mask.expand(-1, -1, -1, seq_len)
-        expected_shape = (batch_size, 1, seq_len, seq_len)
-        assert attention_pad_mask.shape == expected_shape, (
-            f"Attention mask shape mismatch! "
-            f"Got {attention_pad_mask.shape}, expected {expected_shape}"
-        )
-        return attention_pad_mask
-
-    def _get_gpu_info(self) -> list[str]:
-        gpu_name = "Could not retrieve gpu_name"
-        total_memory = "Could not retrieve total_memory"
-        total_cores = "Could not retrieve total_cores"
-        if torch.cuda.is_available() and self.device != "cpu":
-            gpu_name = torch.cuda.get_device_name(self.device)
-            # Convert bytes to MB
-            total_memory = torch.cuda.get_device_properties(
-                self.device
-            ).total_memory // (1024**2)
-            total_cores = torch.cuda.get_device_properties(
-                self.device
-            ).multi_processor_count
-        return gpu_name, total_memory, total_cores
-
     @property
     def tokenizer_obj(self):
         """
@@ -408,7 +358,7 @@ class Agent:
             training_score=result.train_loss,
             validation_score=result.val_loss,
             dataset_name=train_dataloader.dataset_type.value,
-            model_name=self.agent_name,
+            agent_name=self.agent_name,
             vocab=result.vocab,
             total_training_time=round(result.total_time, 2),
             total_params_millions=total_params // 1_000_000,
@@ -425,7 +375,7 @@ class Agent:
         training_score: float,
         validation_score: float,
         dataset_name: str,
-        model_name: str,
+        agent_name: str,
         vocab: dict[str, int],
         total_training_time: float,
         total_params_millions: int,
@@ -437,7 +387,7 @@ class Agent:
         if self.metric_tracker.active:
             self.metric_tracker.log_metrics(
                 {
-                    "summary/model_name": str(model_name),
+                    "summary/agent_name": str(agent_name),
                     "summary/dataset_name": str(dataset_name),
                     "summary/vocab_length": len(vocab),
                     "summary/batch_size": self.batch_size,
@@ -457,10 +407,24 @@ class Agent:
                 # Run-level summary, not per step
                 step=None,
             )
-
         self.logger.info(
-            f"Training summary logged to MetricTracker for model '{model_name}' on dataset '{dataset_name}'."
+            f"Training summary logged to MetricTracker for model '{agent_name}' on dataset '{dataset_name}'."
         )
+
+    def _get_gpu_info(self) -> list[str]:
+        gpu_name = "Could not retrieve gpu_name"
+        total_memory = "Could not retrieve total_memory"
+        total_cores = "Could not retrieve total_cores"
+        if torch.cuda.is_available() and self.device != "cpu":
+            gpu_name = torch.cuda.get_device_name(self.device)
+            # Convert bytes to MB
+            total_memory = torch.cuda.get_device_properties(
+                self.device
+            ).total_memory // (1024**2)
+            total_cores = torch.cuda.get_device_properties(
+                self.device
+            ).multi_processor_count
+        return gpu_name, total_memory, total_cores
 
     def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
         self.logger.info(f"Processing queries: {queries}")
@@ -517,12 +481,3 @@ class Agent:
         # Compute number of batches
         num_batches = ceil(len(queries) / self.batch_size)
         return tensor, num_batches
-
-    def profile_training(self, num_steps=20, log_dir: Optional[str] = None):
-        """
-        Create an AgentProfiler and run the training profiler.
-        """
-        from src.agent_profiler import AgentProfiler
-
-        profiler = AgentProfiler(self, log_dir=log_dir)
-        return profiler.profile_training(num_steps=num_steps)
