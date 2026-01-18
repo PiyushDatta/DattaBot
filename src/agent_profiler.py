@@ -4,7 +4,7 @@ import torch
 import torch.profiler
 from src.agent_config import get_agent_config
 from src.logger import get_logger
-from src.util import get_logging_level_from_config, is_rank_0, is_autocast_enabled
+from src.util import get_logging_level_from_config, is_autocast_enabled, is_rank_0
 
 
 class AgentProfiler:
@@ -49,15 +49,15 @@ class AgentProfiler:
             for step, batch in enumerate(train_dataloader):
                 if step >= num_steps:
                     break
-                input_ids = batch[0].to(self.agent.agent_device)
-                labels = batch[1].to(self.agent.agent_device)
+                input_ids = batch[0].to(self.agent.device)
+                labels = batch[1].to(self.agent.device)
                 attention_pad_mask = self.agent._get_attention_pad_mask(
                     input_ids=input_ids
                 )
                 self.agent.optimizer.zero_grad()
                 with torch.autocast(
-                    device_type=self.agent.agent_device.type,
-                    enabled=is_autocast_enabled(self.agent.agent_device),
+                    device_type=self.agent.device.type,
+                    enabled=is_autocast_enabled(self.agent.device),
                     dtype=torch.bfloat16,
                 ):
                     logits = self.agent.model(

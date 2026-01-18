@@ -221,7 +221,10 @@ def _load_optimizer_state(
 
 
 def load_optimizer_state_from_checkpoint(
-    checkpoint_dir: str, target_dtype: torch.dtype, optimizer
+    checkpoint_dir: str,
+    target_dtype: torch.dtype,
+    target_device: torch.device,
+    optimizer,
 ) -> None:
     """Load optimizer state from checkpoint after optimizer is created."""
     from pathlib import Path
@@ -237,8 +240,12 @@ def load_optimizer_state_from_checkpoint(
     # Convert state tensors to match model dtype if needed
     for state in optimizer_state.get("state", {}).values():
         for k, v in state.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                state[k] = v.to(dtype=target_dtype)
+            if isinstance(v, torch.Tensor):
+                if v.is_floating_point():
+                    state[k] = v.to(device=target_device, dtype=target_dtype)
+                else:
+                    # Non-floating point tensors (like step counters) - just move device
+                    state[k] = v.to(device=target_device)
     optimizer.load_state_dict(optimizer_state)
     logger.debug("Optimizer state loaded successfully")
     return optimizer

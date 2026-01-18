@@ -46,8 +46,8 @@ class DatasetType(Enum):
     STACK_V2_PYTHON = "stack_v2_python"
 
 
-def is_device_cpu(agent_device: str):
-    return agent_device == "cpu"
+def is_device_cpu(device: str):
+    return device == "cpu"
 
 
 class Singleton(type):
@@ -107,9 +107,10 @@ def get_logging_level_from_config(config: DictConfig) -> int:
 def setup_torch_dist_init():
     """Initialize torch distributed across CUDA, ROCm, TPU, MPS, CPU."""
     import os
+    from datetime import timedelta
+
     import torch
     import torch.distributed as dist
-    from datetime import timedelta
 
     if not dist.is_available() or dist.is_initialized():
         return

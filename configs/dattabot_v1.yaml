@@ -37,6 +37,7 @@ agent:
     num_batches_train_every_epoch: 64
     num_batches_val_every_epoch: 16
     fsdp: true
+    training_sync_interval: 25
 inference:
     max_new_tokens: 512
     temperature: 1.0
@@ -57,4 +58,5 @@ env:
     validating_episodes: 100
     logging_level: "INFO"
     tensor_dtype: "float32"
+    autocast_dtype: "bfloat16"
     dataset_name: "openwebtext"

@@ -6,8 +6,16 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+
+# TPU support
+try:
+    import torch_xla.core.xla_model as xm
+
+    HAS_XLA = True
+except ImportError:
+    HAS_XLA = False
 import torch.multiprocessing as mp
-import tqdm
+from src.agent_components import DattaBotAgentComponentFactory, DattaBotAgentComponents
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
 from src.checkpointing import (
@@ -22,6 +30,7 @@ from src.logger import get_logger
 from src.metric_tracker import get_metric_tracker, MetricTracker
 from src.model import DattaBotModel
 from src.tokenizer import get_tokenizer
+from src.training_engine import DattaBotTrainingEngine, TrainingMode
 from src.util import (
     get_device_info,
     get_logging_level_from_config,
@@ -39,85 +48,106 @@ from torch.utils.data.distributed import DistributedSampler
 
 class Agent:
     def __init__(self) -> None:
-        # Initialize the default distributed process group before doing anything else.
-        setup_torch_dist_init()
-        self.local_rank = 0
         # Setup config and logger, both singletons.
         self.config = get_agent_config()
         self.logger = get_logger(
             logging_level=get_logging_level_from_config(self.config)
         )
-        self.metric_tracker: MetricTracker | None = None
-        self.gpu_profiler = None
-        # For file names, start with this prefix
         self.agent_name = self.config.agent.agent_name
-        self.data_dir = self.config.agent.data_directory
-        self.plot_dir = self.config.agent.plot_directory
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         self.autocast_dtype = torch.bfloat16
+        # Initialize the default distributed process group before doing anything else.
+        setup_torch_dist_init()
+        self.local_rank = 0
         # Setup compute.
+        self.device = None
         self.device_info = get_device_info()
         self._initialize_compute()
+        assert self.device is not None
+        # Setup communication manager (user and agent interactions manager).
+        self.comm_manager = DattaBotCommunicationManager()
         # Setup tokenizer.
         self.tokenizer = get_tokenizer(encoding_name="o200k_harmony")
-        self.comm_manager = DattaBotCommunicationManager()
         tokenizer_model_name = repr(self.tokenizer)
         self.logger.info(f"Loaded tokenizer model from path: {tokenizer_model_name}")
+        # Setup model.
         self.d_model = self.config.neural_net.model_dimensions
+        self.model = self._create_model()
+        # Setup optimizer.
+        self.optimizer = self._create_optimizer()
         # Setup data loader.
         self.data_builder = DattabotDataBuilder()
-        # Initialize AMP scaler.
-        # Reduce memory consumption and improve training speed.
-        # https://arxiv.org/abs/1710.03740
-        if (
-            self.device_info["backend"] == "xla"
-            or self.autocast_dtype == torch.bfloat16
-        ):
-            # No scaler needed for TPU
-            self.scaler = None
-        else:
-            self.scaler = torch.amp.GradScaler(device=self.agent_device)
-        # Initialize AdaptiveLogSoftmaxWithLoss.
-        # Vocab size is huge and increases the memory during forward pass by a
-        # lot, to reduce the memory overhead we use AdaptiveLogSoftmaxWithLoss
-        # rather than standard softmax. Tradeoff between accuracy and memory.
-        # https://arxiv.org/abs/1609.04309
-        self.loss_fn = nn.AdaptiveLogSoftmaxWithLoss(
-            in_features=self.d_model,
-            n_classes=self.tokenizer.vocab_size,
-            cutoffs=[10_000, 50_000, self.tokenizer.vocab_size - 1],
-            div_value=4.0,
-            head_bias=False,
-        ).to(self.agent_device, dtype=self.autocast_dtype)
-        # Setup training objects.
-        self.train_batch_idx = 0
-        self.val_batch_idx = 0
-        self.batch_size = self.config.agent.batch_size
-        self.max_response_tokens = self.config.agent.max_response_tokens
-        self.logger.debug(f"Batch size: {self.batch_size}")
-        self.logger.debug(f"Max tokens: {self.max_response_tokens}")
-        self.lr = self.config.agent.lr
+        # Setup agent components, this includes the neural network model.
+        factory = DattaBotAgentComponentFactory(
+            config=self.config,
+            tokenizer=self.tokenizer,
+            optimizer=self.optimizer,
+            device=self.device,
+            device_info=self.device_info,
+            local_rank=self.local_rank,
+            tensor_dtype=self.tensor_dtype,
+            autocast_dtype=self.autocast_dtype,
+        )
+        self.components: DattaBotAgentComponents = factory.create()
+        # Load the agent and its components.
+        load_agent(
+            model=self.model,
+            checkpoint_dir=self.components.weights_dir,
+            optimizer=self.optimizer,
+            device=self.device,
+        )
+        # Monitoring tools.
+        self.metric_tracker: MetricTracker | None = None
+        self.gpu_profiler: BackgroundGPUProfiler | None = BackgroundGPUProfiler(
+            device=self.device
+        )
+        # Setup inference engine when needed.
+        self.inference_engine = None
+        # Setup training engine.
+        self.training_engine = DattaBotTrainingEngine(
+            device=self.device,
+            tokenizer=self.tokenizer,
+            model=self.model,
+            optimizer=self.optimizer,
+            components=self.components,
+            autocast_dtype=self.autocast_dtype,
+            metric_tracker=self.metric_tracker,
+            gpu_profiler=self.gpu_profiler,
+            d_model=self.d_model,
+            save_checkpoint_fn=self._save_agent,
+        )
+
+    def __del__(self) -> None:
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Clean up distributed process group if initialized."""
+        if dist.is_available() and dist.is_initialized():
+            self.logger.info("Destroying distributed process group...")
+            dist.destroy_process_group()
+
+    def _create_model(self) -> DattaBotModel:
+        """Create neural network model."""
         # Setup model.
         # We pass in tensor_dtype to the model, but remember we may use
         # AMP autocast during model inference/training which will have
         # all tensors as float16/bfloat16.
+        model = None
         with torch.device("meta"):
-            self.model = DattaBotModel(
-                device=self.agent_device, dtype=self.tensor_dtype
-            )
-        self.model.to_empty(device=self.agent_device)
-        self.model.init_weights()
-        self.logger.info(f"Model is on: {self.agent_device}")
+            model = DattaBotModel(device=self.device, dtype=self.tensor_dtype)
+        model.to_empty(device=self.device)
+        model.init_weights()
+        self.logger.info(f"Model is on: {self.device}")
         self.logger.info(f"Model dimensions: {self.d_model}")
         self.logger.info(
-            f"Total model parameters: {sum(p.numel() for p in self.model.parameters()):,}"
+            f"Total model parameters: {sum(p.numel() for p in model.parameters()):,}"
         )
         # Convert entire model to consistent dtype after loading
-        if is_autocast_enabled(self.agent_device):
-            self.model = self.model.to(dtype=self.autocast_dtype)
+        if is_autocast_enabled(self.device):
+            model = model.to(dtype=self.autocast_dtype)
             self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
         else:
-            self.model = self.model.to(dtype=self.tensor_dtype)
+            model = model.to(dtype=self.tensor_dtype)
             self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
         # Wrap with distributed layer if we have multiple gpus.
         if dist.is_available() and torch.cuda.device_count() > 1:
@@ -128,73 +158,30 @@ class Agent:
                         reduce_dtype=self.autocast_dtype,
                     )
                 }
-                for layer in self.model.layers:
+                for layer in model.layers:
                     fully_shard(layer, **fsdp_kwargs)
-                fully_shard(self.model, **fsdp_kwargs)
-                assert isinstance(self.model, FSDPModule)
+                fully_shard(model, **fsdp_kwargs)
+                assert isinstance(model, FSDPModule)
             else:
-                self.model = nn.parallel.DistributedDataParallel(
-                    self.model,
+                model = nn.parallel.DistributedDataParallel(
+                    model,
                     device_ids=[self.local_rank],
                     output_device=self.local_rank,
                     find_unused_parameters=False,
                 )
         if self.device_info["backend"] == "cuda":
-            self.model.cuda()
+            model.cuda()
+        return model
 
-        # Validate weights file path and load model weights.
-        self.weights_fname = self.config.agent.weights_file_name
-        weights_dir = os.path.dirname(self.weights_fname)
-        if weights_dir and not os.path.exists(weights_dir):
-            raise FileNotFoundError(f"Weights path does not exist: {weights_dir}")
-        load_agent(
-            model=self.model,
-            checkpoint_dir=self.weights_fname,
-            device=self.agent_device,
-            loss_fn=self.loss_fn,
-            optimizer=None,
-        )
-        # Ensure loss_fn has correct dtype after loading checkpoint
-        self.loss_fn = self.loss_fn.to(dtype=self.autocast_dtype)
+    def _create_optimizer(self) -> torch.optim.Optimizer:
+        """Create optimizer."""
         # TODO(PiyushDatta): Try and get Muon optimizer to work.
-        self.optimizer = torch.optim.AdamW(
+        return torch.optim.AdamW(
             self.model.parameters(),
-            lr=self.lr,
+            lr=self.config.agent.lr,
             weight_decay=self.config.agent.weight_decay,
+            betas=(0.9, 0.95),
         )
-        # Only training epochs, do not include validation epochs.
-        self.lr_scheduler = TorchOneCycleLR(
-            self.optimizer,
-            max_lr=self.lr,
-            epochs=self.config.agent.max_training_num_epochs,
-            steps_per_epoch=self.config.agent.num_batches_train_every_epoch,
-            pct_start=0.3,
-            anneal_strategy="cos",
-        )
-        target_dtype = (
-            self.autocast_dtype
-            if is_autocast_enabled(self.agent_device)
-            else self.tensor_dtype
-        )
-        self.optimizer = load_optimizer_state_from_checkpoint(
-            checkpoint_dir=self.weights_fname,
-            target_dtype=target_dtype,
-            optimizer=self.optimizer,
-        )
-        # Setup inference engine when needed.
-        self.inference_engine = None
-        self.use_moe = self.config.neural_net.use_moe
-        self.moe_weight = self.config.neural_net.moe_load_balance_weight
-        self.training = False
-
-    def __del__(self) -> None:
-        self._cleanup()
-
-    def _cleanup(self) -> None:
-        """Clean up distributed process group if initialized."""
-        if dist.is_available() and dist.is_initialized():
-            self.logger.info("Destroying distributed process group...")
-            dist.destroy_process_group()
 
     def _initialize_compute(self):
         """Main entry point for all compute setup."""
@@ -221,17 +208,17 @@ class Agent:
             self.world_size = 1
         if backend in ("cuda", "rocm"):
             torch.cuda.set_device(self.local_rank)
-            self.agent_device = torch.device(f"cuda:{self.local_rank}")
+            self.device = torch.device(f"cuda:{self.local_rank}")
         elif backend == "tpu":
             import torch_xla.core.xla_model as xm
 
-            self.agent_device = xm.xla_device()
+            self.device = xm.xla_device()
         elif backend == "mps":
-            self.agent_device = torch.device("mps")
+            self.device = torch.device("mps")
         else:
-            self.agent_device = torch.device("cpu")
+            self.device = torch.device("cpu")
         self.logger.debug(
-            f"Device setup complete: device={self.agent_device}, "
+            f"Device setup complete: device={self.device}, "
             f"local_rank={self.local_rank}, world_size={self.world_size}"
         )
 
@@ -239,10 +226,11 @@ class Agent:
         """Helper method to save agent."""
         save_agent(
             model=self.model,
-            device=self.agent_device,
-            checkpoint_dir=self.weights_fname,
-            loss_fn=self.loss_fn,
+            checkpoint_dir=self.components.weights_dir,
+            device=self.device,
             optimizer=self.optimizer,
+            loss_fn=None,
+            metadata=None,
         )
 
     def _setup_inference_engine(self):
@@ -252,7 +240,7 @@ class Agent:
         if self.inference_engine is None:
             self.inference_engine = DattaBotInferenceEngine(
                 model=self.model,
-                device=self.agent_device,
+                device=self.device,
                 adaptive_softmax=self.loss_fn,
             )
             self.logger.info("Inference engine initialized and ready for deployment!")
@@ -290,13 +278,13 @@ class Agent:
         # Setup device.
         if self.device_info["backend"] in ("cuda", "rocm"):
             torch.cuda.set_device(self.local_rank)
-            self.agent_device = f"cuda:{self.local_rank}"
+            self.device = f"cuda:{self.local_rank}"
         elif self.device_info["backend"] == "tpu":
             import torch_xla.core.xla_model as xm
 
-            self.agent_device = xm.xla_device()
+            self.device = xm.xla_device()
         else:
-            self.agent_device = "cpu"
+            self.device = "cpu"
 
     def _compute_loss(
         self, outputs: Tensor, targets: Tensor, mask: Optional[Tensor] = None
@@ -319,8 +307,8 @@ class Agent:
             mask_flat = mask.view(batch_size * seq_len)
             outputs_flat = outputs_flat[mask_flat]
             targets_flat = targets_flat[mask_flat]
-        outputs_flat = outputs_flat.to(self.agent_device)
-        targets_flat = targets_flat.to(self.agent_device)
+        outputs_flat = outputs_flat.to(self.device)
+        targets_flat = targets_flat.to(self.device)
         # Cast to float32 for loss.
         outputs_flat = outputs_flat.float()
         # Main cross-entropy loss.
@@ -356,9 +344,7 @@ class Agent:
         batch_size = input_ids.shape[0]
         seq_len = input_ids.shape[1]
         # [batch, seq_len]
-        attention_pad_mask = (input_ids != self.tokenizer.pad_token_id).to(
-            self.agent_device
-        )
+        attention_pad_mask = (input_ids != self.tokenizer.pad_token_id).to(self.device)
         # unsqueeze to create head dim
         # [batch, seq_len] -> [batch, 1, seq_len]
         attention_pad_mask = attention_pad_mask.unsqueeze(1)
@@ -379,14 +365,14 @@ class Agent:
         gpu_name = "Could not retrieve gpu_name"
         total_memory = "Could not retrieve total_memory"
         total_cores = "Could not retrieve total_cores"
-        if torch.cuda.is_available() and self.agent_device != "cpu":
-            gpu_name = torch.cuda.get_device_name(self.agent_device)
+        if torch.cuda.is_available() and self.device != "cpu":
+            gpu_name = torch.cuda.get_device_name(self.device)
             # Convert bytes to MB
             total_memory = torch.cuda.get_device_properties(
-                self.agent_device
+                self.device
             ).total_memory // (1024**2)
             total_cores = torch.cuda.get_device_properties(
-                self.agent_device
+                self.device
             ).multi_processor_count
         return gpu_name, total_memory, total_cores
 
@@ -398,523 +384,37 @@ class Agent:
         """
         return self.tokenizer
 
-    def new_training_session(self):
-        self.logger.info("Agent's training session has begun...")
-        self.train_batch_idx = 0
-        self.val_batch_idx = 0
-        # Setup MetricTracker (w&b, tensorboard, or plain csv).
-        self.metric_tracker = get_metric_tracker(
-            project=f"{self.config.env.env_name}",
-            run_name=f"{self.config.env.env_name}_training_run_{int(time.time())}",
-        )
-        if self.metric_tracker.active:
-            self.metric_tracker.log_config(
-                {
-                    "batch_size": self.batch_size,
-                    "lr": self.lr,
-                    "epochs": self.config.agent.max_training_num_epochs,
-                    "model_dims": self.config.neural_net.model_dimensions,
-                    "dataset": self.config.env.dataset_name,
-                }
-            )
-            self.logger.info(
-                f"Training session can be monitored here: {self.metric_tracker.get_run_url()}"
-            )
-        # GPU profiler.
-        self.gpu_profiler = BackgroundGPUProfiler(
-            device=self.agent_device,
-            sample_every_x_seconds=1.0,
-        )
-        self.gpu_profiler.start()
-        mp.set_start_method("spawn", force=True)
-        if self.device_info["backend"] in ("cuda", "rocm"):
-            torch.cuda.reset_peak_memory_stats(self.agent_device)
-        self.training = True
-
-    def end_training_session(self):
-        self.logger.info("Agent's training session has ended.")
-        if self.metric_tracker and self.metric_tracker.active:
-            self.logger.info(
-                f"Training session can be monitored here: {self.metric_tracker.get_run_url()}"
-            )
-        if self.gpu_profiler:
-            self.gpu_profiler.stop()
-        self.train_batch_idx = 0
-        self.val_batch_idx = 0
-        self.training = False
-
     def train_agent(self) -> DattaBotAPIResponse:
-        """
-        Main training loop with early stop conditions:
-        - max_train_tokens
-        - max_train_time_hours
-        Includes:
-        - periodic checkpoint saving
-        - best model saving
-        - final model saving
-        """
-        self.logger.info("Starting training process.")
-        response: DattaBotAPIResponse = DattaBotAPIResponse()
-        response.text = "Starting training."
-        train_interrupted = False
-        avg_train_loss = 0
-        avg_val_loss = 0
-        vocab: dict[str, int] = {}
-        try:
-            self.new_training_session()
-            self.gpu_profiler.log_gpu_memory("Training - start training")
-            tokens_processed = 0
-            tokens_per_batch = self.batch_size * self.config.agent.max_response_tokens
-            max_train_tokens = self.config.agent.max_train_tokens
-            max_train_time = self.config.agent.max_train_time_hours
-            total_steps = 0
-            ckpt_interval = self.config.agent.checkpoint_interval_train_steps
-            # seconds
-            max_train_time = max_train_time * 3600
-            # Record start time
-            train_start_time = time.time()
-            # Set an arbitrary starting best val loss amount.
-            best_val_loss: float = float("inf")
-            num_train_batches_per_phase: int = (
-                self.config.agent.num_batches_train_every_epoch
-            )
-            num_val_batches_per_phase: int = (
-                self.config.agent.num_batches_val_every_epoch
-            )
-            # Set up data loaders
-            self.gpu_profiler.log_gpu_memory("Training - before setup data")
-            self.logger.info("Setting up data.")
-            train_dataloader, val_dataloader, vocab = self.data_builder.setup_data()
-            self.gpu_profiler.log_gpu_memory("Training - after setup data")
-            # Actual training algorithm.
-            self.logger.info(
-                f"Got training and validation data for dataset {train_dataloader.dataset_type}. Now going into training loop for "
-                f"{self.config.agent.max_training_num_epochs} epochs, "
-                f"{num_train_batches_per_phase} batches per training epoch, "
-                f"and {num_val_batches_per_phase} batches per validation epoch. "
-                f"Length of vocab: {len(vocab)}. "
-                f"Batch size: {self.batch_size}."
-            )
-            for epoch in range(self.config.agent.max_training_num_epochs):
-                curr_epoch_num = epoch + 1
-                self.logger.debug(
-                    f"\nEpoch {curr_epoch_num}/{self.config.agent.max_training_num_epochs}"
-                )
-                # Tell DistributedSampler to shuffle differently this epoch.
-                if isinstance(train_dataloader.sampler, DistributedSampler):
-                    train_dataloader.sampler.set_epoch(curr_epoch_num)
-                if isinstance(val_dataloader.sampler, DistributedSampler):
-                    val_dataloader.sampler.set_epoch(curr_epoch_num)
-                self.gpu_profiler.log_gpu_memory("Training - before train epoch")
-                # === Training ===
-                avg_train_loss, train_steps_this_epoch, train_tokens_in_epoch = (
-                    self._train_epoch(
-                        epoch_num=curr_epoch_num,
-                        dataloader=train_dataloader,
-                        num_batches=num_train_batches_per_phase,
-                    )
-                )
-                self.gpu_profiler.log_gpu_memory("Training - after train epoch")
-                total_steps += train_steps_this_epoch
-                # Update tokens processed
-                tokens_processed += train_tokens_in_epoch
-                response.num_train_tokens_processed += train_tokens_in_epoch
-                response.num_train_batches += train_steps_this_epoch
-                elapsed = time.time() - train_start_time
-                self.logger.debug(
-                    f"[Epoch {curr_epoch_num}] avg_train_loss={avg_train_loss:.4f}, "
-                    f"tokens_processed={tokens_processed:,}"
-                )
-                # Stop conditions
-                if max_train_tokens != -1 and tokens_processed >= max_train_tokens:
-                    self.logger.info(
-                        f"Reached {tokens_processed:,} tokens. Stopping training."
-                    )
-                    break
-                if max_train_time != -1 and elapsed >= max_train_time:
-                    self.logger.info(
-                        f"Reached {elapsed/3600:.2f} hours. Stopping training."
-                    )
-                    break
-                # === Validation ===
-                avg_val_loss, val_steps_this_epoch, val_tokens_in_epoch = (
-                    self._val_epoch(
-                        epoch_num=curr_epoch_num,
-                        dataloader=val_dataloader,
-                        num_batches=num_val_batches_per_phase,
-                    )
-                )
-                tokens_processed += val_tokens_in_epoch
-                response.num_val_tokens_processed += val_tokens_in_epoch
-                response.num_val_batches += val_steps_this_epoch
-                self.logger.debug(
-                    f"[Epoch {curr_epoch_num}] avg_val_loss={avg_val_loss:.4f}"
-                )
-                if is_rank_0():
-                    # Log epoch metrics to MetricTracker
-                    self.metric_tracker.log_metrics(
-                        {
-                            "train/loss": avg_train_loss,
-                            "val/loss": avg_val_loss,
-                            "train/tokens_processed": tokens_processed,
-                        },
-                        step=None,
-                    )
-                # Save best model.
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    self._save_agent()
-                    self.logger.info("New best model saved!")
-                    self.logger.info(f"Best validation loss: {avg_val_loss:.2f}\n")
-                # Periodic checkpoint.
-                if total_steps % ckpt_interval == 0:
-                    self._save_agent()
-                    self.logger.info(
-                        f"New model saved since total_steps ({total_steps}) has hit ckpt_interval ({ckpt_interval})."
-                    )
-            # Done training!
-            if self.metric_tracker.active:
-                response.text = (
-                    f"Successfully trained on {response.num_train_batches} batches. "
-                    f"Validated on {response.num_val_batches} batches. "
-                    f"View training progress at: {self.metric_tracker.get_run_url()}"
-                )
-            else:
-                response.text = (
-                    f"Successfully trained on {response.num_train_batches} batches. "
-                    f"Validated on {response.num_val_batches} batches."
-                )
-        except KeyboardInterrupt:
-            # Stopped training because we cancelled it via ctrl+c (KeyboardInterrupt).
-            train_interrupted = True
-            err_msg = f"Training interrupted by user (ctrl+c)."
-            response.text = err_msg
-            self.logger.error(err_msg)
-            self.end_training_session()
-        except Exception as e:
-            err_msg = f"Stopped training! Something unexpected happened: {e}"
-            tb_str = traceback.format_exc()
-            self.logger.error(err_msg)
-            self.logger.error(f"An error occurred during training:\n{tb_str}")
-            response.text = err_msg
-            self.end_training_session()
-        finally:
-            # Always save the final model.
-            self._save_agent()
-        # Log the training details, including the time taken to train.
-        train_end_time = time.time()
-        total_training_time = train_end_time - train_start_time
-        # Calculate the total number of model parameters
+        """Training entry point, just delegate most of the work to the training engine."""
+        # Setup data
+        self.gpu_profiler.log_gpu_memory("Training - before setup data")
+        self.logger.info("Setting up data.")
+        train_dataloader, val_dataloader, vocab = self.data_builder.setup_data()
+        self.gpu_profiler.log_gpu_memory("Training - after setup data")
+        # Run training
+        result = self.training_engine.train(
+            train_dataloader=train_dataloader,
+            val_dataloader=val_dataloader,
+            vocab=vocab,
+            mode=TrainingMode.PRETRAIN,
+        )
+        # Log training details
         total_params = sum(p.numel() for p in self.model.parameters())
-        total_params_millions = total_params // 1_000_000
         self._log_training_details(
-            num_train_tokens_processed=response.num_train_tokens_processed,
-            num_val_tokens_processed=response.num_val_tokens_processed,
-            num_train_batches=response.num_train_batches,
-            num_val_batches=response.num_val_batches,
-            training_score=avg_train_loss,
-            validation_score=avg_val_loss,
+            num_train_tokens_processed=result.response.num_train_tokens_processed,
+            num_val_tokens_processed=result.response.num_val_tokens_processed,
+            num_train_batches=result.response.num_train_batches,
+            num_val_batches=result.response.num_val_batches,
+            training_score=result.train_loss,
+            validation_score=result.val_loss,
             dataset_name=train_dataloader.dataset_type.value,
             model_name=self.agent_name,
-            vocab=vocab,
-            total_training_time=round(total_training_time, 2),
-            total_params_millions=total_params_millions,
-            interrupted=train_interrupted,
+            vocab=result.vocab,
+            total_training_time=round(result.total_time, 2),
+            total_params_millions=total_params // 1_000_000,
+            interrupted=result.interrupted,
         )
-        self.end_training_session()
-        return response
-
-    def _train_epoch(
-        self, epoch_num: int, dataloader, num_batches: int
-    ) -> tuple[float, int, int]:
-        """
-        Run one training epoch.
-
-        Returns:
-            avg_loss: Average loss for this epoch
-            steps: Number of batches processed
-            tokens_processed: Number of tokens processed
-        """
-        self.model.train()
-        total_loss = 0.0
-        total_main_loss = 0.0
-        total_moe_loss = 0.0
-        total_steps = 0
-        total_tokens = 0
-        log_and_plot_every_x_steps = (
-            self.config.agent.logging_and_plotting_every_x_steps
-        )
-        # Setup progress bar
-        progress_bar = tqdm.tqdm(
-            enumerate(dataloader),
-            total=num_batches,
-            desc=f"Training for epoch {epoch_num}",
-            leave=True,
-            disable=not is_rank_0(),
-        )
-        # Go through all the batches.
-        for batch_idx, batch in progress_bar:
-            if batch_idx >= num_batches:
-                break
-            # input_ids: [batch, seq_len]
-            input_ids = batch[0].to(self.agent_device)
-            labels = batch[1].to(self.agent_device)
-            batch_size = input_ids.shape[0]
-            attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
-            # Zero the gradients.
-            self.optimizer.zero_grad()
-            with torch.autocast(
-                device_type=self.agent_device.type,
-                enabled=is_autocast_enabled(self.agent_device),
-                dtype=self.autocast_dtype,
-            ):
-                # Forward pass.
-                logits = self.model(
-                    input_ids=input_ids, attention_pad_mask=attention_pad_mask
-                )
-                assert logits.shape == (
-                    batch_size,
-                    self.max_response_tokens,
-                    self.d_model,
-                ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
-                self.logger.debug(
-                    f"logits.shape = {logits.shape}, labels.shape = {labels.shape}"
-                )
-                # Calculate loss.
-                self.gpu_profiler.log_gpu_memory("Training - before loss")
-                padding_mask = labels != self.tokenizer.pad_token_id
-                main_loss, moe_loss = self._compute_loss(
-                    outputs=logits, targets=labels, mask=padding_mask
-                )
-                if moe_loss is not None:
-                    loss = main_loss + self.moe_weight * moe_loss
-                else:
-                    loss = main_loss
-                self.gpu_profiler.log_gpu_memory("Training - after loss")
-            # Backprop.
-            if self.scaler:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            # Clip gradients to prevent exploding gradients.
-            if self.config.agent.max_grad_norm:
-                if self.scaler:
-                    self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.config.agent.max_grad_norm
-                )
-            # Update weights.
-            if self.scaler:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            elif self.device_info["backend"] == "xla":
-                # For TPUs
-                import torch_xla.core.xla_model as xm
-
-                xm.optimizer_step(self.optimizer)
-            else:
-                self.optimizer.step()
-            # Update learning rate if using a scheduler.
-            if self.lr_scheduler:
-                self.lr_scheduler.step()
-            # Update metrics
-            total_loss += loss.item()
-            total_main_loss += main_loss.item()
-            if moe_loss is not None:
-                total_moe_loss += moe_loss.item()
-            total_steps += 1
-            # Count only non-pad tokens
-            total_tokens += padding_mask.sum().item()
-            avg_loss = total_loss / total_steps
-            avg_main_loss = total_main_loss / total_steps
-            avg_moe_loss = total_moe_loss / total_steps if moe_loss is not None else 0.0
-            loss_per_token = (
-                total_loss / total_tokens if total_tokens > 0 else float("inf")
-            )
-            # Update progress bar
-            progress_bar.set_postfix(
-                {
-                    "loss": avg_loss,
-                    "main_loss": avg_main_loss,
-                    "moe_loss": avg_moe_loss,
-                    "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
-                }
-            )
-            # Log metrics using MetricTracker
-            if is_rank_0():
-                metrics = {
-                    "train/batch_loss": loss.item(),
-                    "train/batch_main_loss": main_loss.item(),
-                    "train/batch_perplexity": torch.exp(main_loss).item(),
-                    "train/learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "train/loss_per_token": loss_per_token,
-                }
-                if moe_loss is not None:
-                    metrics["train/batch_moe_loss"] = moe_loss.item()
-                    metrics["train/moe_weight"] = self.moe_weight
-                self.metric_tracker.log_metrics(metrics, step=None)
-                if total_steps % log_and_plot_every_x_steps == 0:
-                    moe_str = (
-                        f", moe_loss={moe_loss.item():.4f}"
-                        if moe_loss is not None
-                        else ""
-                    )
-                    self.logger.info(
-                        f"[Epoch {epoch_num} | Step {total_steps}] "
-                        f"total_loss={loss.item():.4f}, "
-                        f"main_loss={main_loss.item():.4f}{moe_str}, "
-                        f"perplexity={torch.exp(main_loss).item():.2f}, "
-                        f"lr={self.optimizer.param_groups[0]['lr']:.2e}, "
-                        f"loss/token={loss_per_token:.4f}"
-                    )
-                    latest_metrics = self.gpu_profiler.get_latest_metrics()
-                    if latest_metrics:
-                        self.logger.info(
-                            f"Epoch {epoch_num} GPU Metrics - "
-                            f"Memory Allocated: {latest_metrics.memory_allocated} MB, "
-                            f"Utilization: {latest_metrics.utilization}%, "
-                            f"CPU Usage: {latest_metrics.cpu_percent}%, "
-                            f"RAM Usage: {latest_metrics.ram_percent}%"
-                        )
-        # Sync loss across all ranks.
-        if dist.is_available() and dist.is_initialized():
-            loss_tensor = torch.tensor(
-                [total_loss, total_steps, total_tokens], device=self.agent_device
-            )
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            total_loss, total_steps, total_tokens = loss_tensor.tolist()
-            avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
-        return avg_loss, total_steps, total_tokens
-
-    def _val_epoch(
-        self, epoch_num: int, dataloader, num_batches: int
-    ) -> tuple[float, int, int]:
-        """
-        Run one validation epoch.
-
-        Returns:
-            avg_loss: Average validation loss
-            steps: Number of batches processed
-            tokens_processed: Number of tokens processed
-        """
-        self.model.eval()
-        total_loss = 0.0
-        total_steps = 0
-        total_tokens = 0
-        # Setup progress bar
-        progress_bar = tqdm.tqdm(
-            enumerate(dataloader),
-            total=num_batches,
-            desc=f"Validating for epoch {epoch_num}",
-            leave=True,
-            disable=not is_rank_0(),
-        )
-        # Disable gradient calculations and go through all the batches.
-        with torch.no_grad():
-            for batch_idx, batch in progress_bar:
-                if batch_idx >= num_batches:
-                    break
-                input_ids, labels = batch[0].to(self.agent_device), batch[1].to(
-                    self.agent_device
-                )
-                batch_size = input_ids.shape[0]
-                attention_pad_mask = self._get_attention_pad_mask(input_ids=input_ids)
-                with torch.autocast(
-                    device_type=self.agent_device.type,
-                    enabled=is_autocast_enabled(self.agent_device),
-                    dtype=self.autocast_dtype,
-                ):
-                    # Forward pass.
-                    logits = self.model(
-                        input_ids=input_ids, attention_pad_mask=attention_pad_mask
-                    )
-                    assert logits.shape == (
-                        batch_size,
-                        self.max_response_tokens,
-                        self.d_model,
-                    ), f"Model output/Logits shape mismatch. Logits shape: {logits.shape}, expected: ({batch_size}, {self.max_response_tokens}, {self.d_model})"
-                    # Calculate loss.
-                    padding_mask = labels != self.tokenizer.pad_token_id
-                    loss, _ = self._compute_loss(
-                        outputs=logits, targets=labels, mask=padding_mask
-                    )
-                total_loss += loss.item()
-                total_steps += 1
-                # Count only non-pad tokens
-                total_tokens += padding_mask.sum().item()
-                avg_loss = total_loss / total_steps
-                loss_per_token = (
-                    total_loss / total_tokens if total_tokens > 0 else float("inf")
-                )
-                perplexity = torch.exp(torch.tensor(avg_loss)).item()
-                # Update progress bar.
-                progress_bar.set_postfix(
-                    {
-                        "val_loss": avg_loss,
-                        "val_perplexity": perplexity,
-                    }
-                )
-                if is_rank_0():
-                    # Log validation batch metrics.
-                    self.metric_tracker.log_metrics(
-                        {
-                            "val/batch_loss": loss.item(),
-                            "val/batch_perplexity": torch.exp(loss).item(),
-                            "val/loss_per_token": loss_per_token,
-                        },
-                        step=None,
-                    )
-        # Sync loss across all ranks.
-        if dist.is_available() and dist.is_initialized():
-            loss_tensor = torch.tensor(
-                [total_loss, total_steps, total_tokens], device=self.agent_device
-            )
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            total_loss, total_steps, total_tokens = loss_tensor.tolist()
-            avg_loss = total_loss / total_steps if total_steps > 0 else float("inf")
-        # Log epoch summary if rank 0.
-        if is_rank_0():
-            self.logger.info(
-                f"[Validation | Epoch {epoch_num}] avg_loss={avg_loss:.4f}, "
-                f"perplexity={torch.exp(torch.tensor(avg_loss)).item():.2f}"
-            )
-            self.metric_tracker.log_metrics(
-                {
-                    "val/loss": avg_loss,
-                    "val/perplexity": perplexity,
-                },
-                step=None,
-            )
-
-        return avg_loss, total_steps, total_tokens
-
-    def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
-        self.logger.info(f"Processing queries: {queries}")
-        self.logger.info(f"Queries length: {len(queries)}")
-        # Call the inference engine.
-        if self.inference_engine is None:
-            self._setup_inference_engine()
-        assert self.inference_engine is not None, "Inference engine is not set up."
-        # Use inference engine for batch generation.
-        responses: list[DattaBotAPIResponse] = self.inference_engine.batch_generate(
-            queries=queries
-        )
-        # Validate responses.
-        assert isinstance(responses, list), f"Expected list, got {type(responses)}"
-        assert all(
-            isinstance(r, DattaBotAPIResponse) for r in responses
-        ), "All responses must be DattaBotAPIResponse"
-        # Log the results. Only on rank 0.
-        if is_rank_0():
-            self.logger.debug(f"Query Response for first response: {responses[0].text}")
-            self.logger.debug(
-                f"Number of Batches for first response: {responses[0].num_train_batches}"
-            )
-            self.logger.debug(
-                f"Tensor Response for the first response: {responses[0].tensor_response}"
-            )
-            self.logger.debug(f"Number of responses: {len(responses)}")
-        return responses
+        return result.response
 
     def _log_training_details(
         self,
@@ -961,6 +461,34 @@ class Agent:
         self.logger.info(
             f"Training summary logged to MetricTracker for model '{model_name}' on dataset '{dataset_name}'."
         )
+
+    def respond_to_queries(self, queries: list[str]) -> list[DattaBotAPIResponse]:
+        self.logger.info(f"Processing queries: {queries}")
+        self.logger.info(f"Queries length: {len(queries)}")
+        # Call the inference engine.
+        if self.inference_engine is None:
+            self._setup_inference_engine()
+        assert self.inference_engine is not None, "Inference engine is not set up."
+        # Use inference engine for batch generation.
+        responses: list[DattaBotAPIResponse] = self.inference_engine.batch_generate(
+            queries=queries
+        )
+        # Validate responses.
+        assert isinstance(responses, list), f"Expected list, got {type(responses)}"
+        assert all(
+            isinstance(r, DattaBotAPIResponse) for r in responses
+        ), "All responses must be DattaBotAPIResponse"
+        # Log the results. Only on rank 0.
+        if is_rank_0():
+            self.logger.debug(f"Query Response for first response: {responses[0].text}")
+            self.logger.debug(
+                f"Number of Batches for first response: {responses[0].num_train_batches}"
+            )
+            self.logger.debug(
+                f"Tensor Response for the first response: {responses[0].tensor_response}"
+            )
+            self.logger.debug(f"Number of responses: {len(responses)}")
+        return responses
 
     def convert_queries_to_tensors(self, queries: list[str]) -> tuple[Tensor, int]:
         """
