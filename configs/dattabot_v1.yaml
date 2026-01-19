@@ -1,30 +1,30 @@
 neural_net:
-    n_layers: 16
-    n_heads: 8
-    model_dimensions: 1024
-    hidden_layers: 1024
-    zeroed_drop_probability: 0.1
+    n_layers: 28
+    n_heads: 20
+    model_dimensions: 2560
+    hidden_layers: 6912
+    zeroed_drop_probability: 0.05
     gradient_checkpointing: true
     # MoE Configuration
     use_moe: true
-    num_experts: 4
+    num_experts: 8
     num_experts_per_token: 2
     expert_capacity_factor: 1.25
     moe_load_balance_weight: 0.01
 agent:
     agent_name: "DattaBot"
     weights_file_name: "dattabot-weights/DATTABOT_V1_WEIGHTS"
-    batch_size: 64
-    max_response_tokens: 256
+    batch_size: 24
+    max_response_tokens: 512
     max_training_num_epochs: 1_000_000
     max_train_tokens: -1
-    max_train_time_hours: 10
-    checkpoint_interval_train_steps: 2000
-    input_block_size: 256
+    max_train_time_hours: 100
+    checkpoint_interval_train_steps: 1000
+    input_block_size: 512
     max_grad_norm: 1.0
     gamma: 0.99
     tau: 0.005
-    lr: 0.0001
+    lr: 0.00005
     epsilon_start: 0.9
     epsilon_min: 0.05
     epsilon_decay: 1000
@@ -37,7 +37,7 @@ agent:
     num_batches_train_every_epoch: 128
     num_batches_val_every_epoch: 32
     fsdp: true
-    training_sync_interval: 64
+    training_sync_interval: 32
 inference:
     max_new_tokens: 512
     temperature: 1.0

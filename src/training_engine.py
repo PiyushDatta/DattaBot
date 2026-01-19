@@ -413,7 +413,12 @@ class DattaBotTrainingEngine:
             train_loss=self.avg_train_loss,
             val_loss=self.avg_val_loss,
         )
-        self.chkpt_manager.save_agent()
+        # Use fast FSDP save if FSDP is enabled, otherwise use regular save
+        config = get_agent_config()
+        if config.agent.fsdp and dist.is_available() and torch.cuda.device_count() > 1:
+            self.chkpt_manager.save_agent_fsdp()
+        else:
+            self.chkpt_manager.save_agent()
         self.logger.info(f"Saved model ({checkpoint_type}) at step {self.global_step}")
 
     def _build_success_message(self, response: DattaBotAPIResponse) -> str:

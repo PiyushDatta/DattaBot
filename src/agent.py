@@ -88,7 +88,7 @@ class Agent:
         self.components: DattaBotAgentComponents = factory.create()
         # Configure bundle references (once)
         self.chkpt_manager: DattaBotCheckpointManager = get_checkpoint_manager(
-            self.components.weights_dir
+            self.config.agent.weights_file_name
         )
         self.chkpt_manager.bundle.unwrapped_model = self.unwrapped_orig_model
         self.chkpt_manager.bundle.wrapped_model = self.model
@@ -140,67 +140,82 @@ class Agent:
         # We pass in tensor_dtype to the model, but remember we may use
         # AMP autocast during model inference/training which will have
         # all tensors as float16/bfloat16.
-        model = None
+        use_fsdp = (
+            self.config.agent.fsdp
+            and dist.is_available()
+            and torch.cuda.device_count() > 1
+        )
         with torch.device("meta"):
             model = DattaBotModel(device=self.device, dtype=self.tensor_dtype)
-        model.to_empty(device=self.device)
-        model.init_weights()
-        self.logger.info(f"Model is on: {self.device}")
         self.logger.info(f"Model dimensions: {self.d_model}")
-        self.logger.info(
-            f"Total model parameters: {sum(p.numel() for p in model.parameters()):,}"
-        )
-        # Convert entire model to consistent dtype after loading
-        if is_autocast_enabled(self.device):
+        unwrapped_model = model
+        if use_fsdp:
+            # For FSDP2: initialize weights on CPU first, then apply sharding
+            # This is required because to_empty doesn't work correctly with DTensors
+            self.logger.info(
+                "Using FSDP with CPU initialization for large model support"
+            )
+
+            # Materialize and initialize on CPU first
+            model.to_empty(device=torch.device("cpu"))
+            model.init_weights()
+
+            # Convert to target dtype before sharding
             model = model.to(dtype=self.autocast_dtype)
-            self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
+
+            total_params = sum(p.numel() for p in model.parameters())
+            self.logger.info(f"Total model parameters: {total_params:,}")
+            self.logger.info(f"Model initialized on CPU, applying FSDP sharding...")
+
+            # Apply FSDP sharding - this will shard and move to GPUs
+            fsdp_kwargs = {
+                "mp_policy": MixedPrecisionPolicy(
+                    param_dtype=self.autocast_dtype,
+                    reduce_dtype=self.autocast_dtype,
+                )
+            }
+            for layer in model.layers:
+                fully_shard(layer, **fsdp_kwargs)
+            fully_shard(model, **fsdp_kwargs)
+            assert isinstance(model, FSDPModule)
+            self.logger.info("FSDP sharding applied, model distributed across GPUs")
+
+            # Load checkpoint if exists using checkpoint manager
+            chkpt_manager = get_checkpoint_manager(self.config.agent.weights_file_name)
+            chkpt_manager.load_model_fsdp(
+                model=model,
+                device=self.device,
+                target_dtype=self.autocast_dtype,
+            )
+            return unwrapped_model, model
         else:
-            model = model.to(dtype=self.tensor_dtype)
-            self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
-        if self.device_info["backend"] == "cuda":
-            model.cuda()
-        # Load checkpoint BEFORE distributed wrapping
-        self._load_checkpoint_into_model(model)
-        # Wrap after loading (modifies model in-place)
-        wrapped_model = self._distribute_model(model=model)
-        # Note: If using FSDP, model and wrapped_model will be the same object
-        return model, wrapped_model
-
-    def _load_checkpoint_into_model(self, model: DattaBotModel) -> None:
-        """Load checkpoint into model before wrapping."""
-        from pathlib import Path
-
-        from safetensors.torch import load_file as load_safetensors
-
-        weights_dir = Path(self.config.agent.weights_file_name)
-        model_path = weights_dir / "model.safetensors"
-
-        if not model_path.exists():
-            self.logger.info(f"No checkpoint found at {model_path}, starting fresh")
-            return
-
-        try:
-            self.logger.info(f"Loading model weights from {model_path}")
-            state_dict = load_safetensors(str(model_path), device="cpu")
-            # Clean up DDP prefix if present
-            state_dict = {
-                k.replace("module.", "", 1) if k.startswith("module.") else k: v
-                for k, v in state_dict.items()
-            }
-            # Move to correct device and dtype
-            state_dict = {
-                k: v.to(device=self.device, dtype=model.token_embedding.weight.dtype)
-                for k, v in state_dict.items()
-            }
-            incompatible = model.load_state_dict(state_dict, strict=False)
-            if incompatible.missing_keys:
-                self.logger.warning(f"Missing keys: {incompatible.missing_keys}")
-            if incompatible.unexpected_keys:
-                self.logger.warning(f"Unexpected keys: {incompatible.unexpected_keys}")
-            self.logger.info("Model weights loaded successfully (before wrapping)")
-        except Exception as e:
-            self.logger.error(f"Failed to load checkpoint: {e}")
-            raise
+            # Non-FSDP path: original behavior for single GPU or DDP
+            model.to_empty(device=self.device)
+            model.init_weights()
+            self.logger.info(f"Model is on: {self.device}")
+            self.logger.info(
+                f"Total model parameters: {sum(p.numel() for p in model.parameters()):,}"
+            )
+            # Convert entire model to consistent dtype after loading
+            if is_autocast_enabled(self.device):
+                model = model.to(dtype=self.autocast_dtype)
+                self.logger.info(f"Converted model to {self.autocast_dtype} dtype.")
+            else:
+                model = model.to(dtype=self.tensor_dtype)
+                self.logger.info(f"Converted model to {self.tensor_dtype} dtype.")
+            if self.device_info["backend"] == "cuda":
+                model.cuda()
+            # Load checkpoint BEFORE distributed wrapping using checkpoint manager
+            chkpt_manager = get_checkpoint_manager(self.config.agent.weights_file_name)
+            chkpt_manager.load_model(
+                model=model,
+                device=self.device,
+                target_dtype=model.token_embedding.weight.dtype,
+            )
+            # Wrap after loading (modifies model in-place)
+            model = self._distribute_model(model=model)
+            # Note: If using DDP, model and wrapped_model will be different objects
+            return unwrapped_model, model
 
     def _distribute_model(self, model) -> DattaBotModel:
         # Wrap with distributed layer if we have multiple gpus.

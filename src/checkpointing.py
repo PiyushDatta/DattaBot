@@ -326,6 +326,87 @@ class DattaBotCheckpointManager(metaclass=Singleton):
             self.logger.error(f"Failed to save checkpoint: {e}")
             raise
 
+    def save_agent_fsdp(self) -> None:
+        """
+        Fast checkpoint saving for FSDP models using sharded state dicts.
+
+        Instead of gathering all shards to rank 0 (slow), each rank saves
+        its own shard directly. This is MUCH faster for large models.
+
+        Uses PyTorch's distributed checkpoint API for efficient saving.
+        """
+        if not self.bundle.is_configured():
+            raise ValueError(
+                "Bundle not configured. Set bundle.unwrapped_model and bundle.device first."
+            )
+        self.logger.info(f"Saving FSDP checkpoint to {self.checkpoint_dir}")
+
+        try:
+            import torch.distributed.checkpoint as dcp
+            from torch.distributed.checkpoint.state_dict import (
+                get_state_dict,
+                StateDictOptions,
+            )
+
+            # Sync before saving
+            self._sync_device(self.bundle.device)
+            self._ensure_directory(self.checkpoint_dir)
+
+            # Get sharded state dict (no all-gather, each rank keeps its shard)
+            model_state, optimizer_state = get_state_dict(
+                self.bundle.unwrapped_model,
+                self.bundle.optimizer,
+                options=StateDictOptions(
+                    full_state_dict=False,  # Keep sharded, don't gather
+                    cpu_offload=True,  # Offload to CPU to save GPU memory
+                ),
+            )
+
+            # Use distributed checkpoint to save shards in parallel
+            state_dict = {
+                "model": model_state,
+                "optimizer": optimizer_state,
+            }
+
+            dcp.save(
+                state_dict,
+                checkpoint_id=str(self.checkpoint_dir / "distributed_ckpt"),
+            )
+
+            # Save metadata (only rank 0)
+            if _should_save_on_this_rank():
+                # Save loss function if provided
+                if self.bundle.loss_fn is not None:
+                    self._atomic_save_pt(
+                        self.bundle.loss_fn.state_dict(), self.paths.loss_fn
+                    )
+                # Build and save metadata
+                metadata = CheckpointMetadata(
+                    epoch=self.bundle.epoch,
+                    global_step=self.bundle.global_step,
+                    train_loss=self.bundle.train_loss,
+                    val_loss=self.bundle.val_loss,
+                    tokens_processed=self.bundle.tokens_processed,
+                    agent_name=self.bundle.agent_name,
+                )
+                self._save_metadata(metadata)
+                self.logger.info(
+                    f"FSDP checkpoint saved: epoch={self.bundle.epoch}, step={self.bundle.global_step}, "
+                    f"train_loss={f'{self.bundle.train_loss:.4f}' if self.bundle.train_loss is not None else 'N/A'}, "
+                    f"val_loss={f'{self.bundle.val_loss:.4f}' if self.bundle.val_loss is not None else 'N/A'}"
+                )
+
+            dist_barrier(device=self.bundle.device)
+
+        except ImportError:
+            self.logger.warning(
+                "torch.distributed.checkpoint not available, falling back to slow save"
+            )
+            self.save_agent()
+        except Exception as e:
+            self.logger.error(f"Failed to save FSDP checkpoint: {e}")
+            raise
+
     def load_agent(self, strict: bool = True) -> CheckpointMetadata:
         """
         Load model, optimizer, and loss function into the bundle.
@@ -380,6 +461,307 @@ class DattaBotCheckpointManager(metaclass=Singleton):
         finally:
             if self.bundle.device is not None:
                 dist_barrier(device=self.bundle.device)
+
+    def load_agent_fsdp(self) -> CheckpointMetadata:
+        """
+        Fast checkpoint loading for FSDP models using sharded state dicts.
+
+        Loads sharded checkpoints saved by save_agent_fsdp(). Each rank loads
+        only its own shard, which is much faster than gathering the full model.
+        """
+        if self.bundle.unwrapped_model is None:
+            raise ValueError("Bundle not configured. Set bundle.unwrapped_model first.")
+
+        distributed_ckpt_path = self.checkpoint_dir / "distributed_ckpt"
+        if not distributed_ckpt_path.exists():
+            self.logger.info(f"No FSDP checkpoint found at {distributed_ckpt_path}")
+            return CheckpointMetadata()
+
+        self.logger.info(f"Loading FSDP checkpoint from {distributed_ckpt_path}")
+
+        try:
+            import torch.distributed.checkpoint as dcp
+            from torch.distributed.checkpoint.state_dict import (
+                get_state_dict,
+                set_state_dict,
+                StateDictOptions,
+            )
+
+            # Get current sharded state dict structure
+            model_state, optimizer_state = get_state_dict(
+                self.bundle.unwrapped_model,
+                self.bundle.optimizer,
+                options=StateDictOptions(
+                    full_state_dict=False,
+                    cpu_offload=True,
+                ),
+            )
+
+            state_dict = {
+                "model": model_state,
+                "optimizer": optimizer_state,
+            }
+
+            # Load sharded checkpoint (each rank loads its shard)
+            dcp.load(
+                state_dict,
+                checkpoint_id=str(distributed_ckpt_path),
+            )
+
+            # Apply loaded state to model and optimizer
+            set_state_dict(
+                self.bundle.unwrapped_model,
+                self.bundle.optimizer,
+                model_state_dict=state_dict["model"],
+                optim_state_dict=state_dict["optimizer"],
+                options=StateDictOptions(
+                    full_state_dict=False,
+                    cpu_offload=True,
+                ),
+            )
+
+            self.logger.info("FSDP checkpoint loaded successfully")
+
+            # Load loss function state if available
+            if self.bundle.loss_fn is not None:
+                self._load_loss_fn_state()
+
+            # Load and return metadata
+            metadata = self._load_metadata()
+            self.bundle.epoch = metadata.epoch
+            self.bundle.global_step = metadata.global_step
+            self.bundle.tokens_processed = metadata.tokens_processed
+            self.bundle.train_loss = metadata.train_loss
+            self.bundle.val_loss = metadata.val_loss
+
+            return metadata
+
+        except ImportError:
+            self.logger.warning(
+                "torch.distributed.checkpoint not available, falling back to slow load"
+            )
+            return self.load_agent()
+        except Exception as e:
+            self.logger.error(f"Failed to load FSDP checkpoint: {e}")
+            raise
+        finally:
+            if self.bundle.device is not None:
+                dist_barrier(device=self.bundle.device)
+
+    def load_model(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        target_dtype: torch.dtype | None = None,
+    ) -> bool:
+        """
+        Load checkpoint into a model (non-FSDP).
+
+        This is for loading weights into a model before any distributed
+        wrapping is applied.
+
+        Args:
+            model: The model to load weights into
+            device: The device to move weights to
+            target_dtype: Optional dtype to convert weights to
+
+        Returns:
+            True if checkpoint was loaded, False if no checkpoint exists
+        """
+        if not self.paths.exists():
+            self.logger.info(
+                f"No checkpoint found at {self.paths.model}, starting fresh"
+            )
+            return False
+
+        try:
+            self.logger.info(f"Loading model weights from {self.paths.model}")
+            state_dict = load_safetensors(str(self.paths.model), device="cpu")
+
+            # Clean up DDP prefix if present
+            state_dict = _clean_fsdp_state_dict_keys(state_dict)
+
+            # Move to correct device and dtype
+            if target_dtype is not None:
+                state_dict = {
+                    k: v.to(device=device, dtype=target_dtype)
+                    for k, v in state_dict.items()
+                }
+            else:
+                state_dict = {k: v.to(device=device) for k, v in state_dict.items()}
+
+            incompatible = model.load_state_dict(state_dict, strict=False)
+            if incompatible.missing_keys:
+                self.logger.warning(f"Missing keys: {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                self.logger.warning(f"Unexpected keys: {incompatible.unexpected_keys}")
+            self.logger.info("Model weights loaded successfully")
+
+            # Also load metadata into bundle if available
+            metadata = self._load_metadata()
+            if metadata:
+                self.bundle.epoch = metadata.epoch
+                self.bundle.global_step = metadata.global_step
+                self.bundle.tokens_processed = metadata.tokens_processed
+                self.bundle.train_loss = metadata.train_loss
+                self.bundle.val_loss = metadata.val_loss
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to load checkpoint: {e}")
+            raise
+
+    def load_model_fsdp(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        target_dtype: torch.dtype = torch.bfloat16,
+    ) -> bool:
+        """
+        Load checkpoint into an FSDP-wrapped model.
+
+        Checks for distributed checkpoint format first (faster), then falls
+        back to legacy safetensors format.
+
+        Args:
+            model: The FSDP-wrapped model to load weights into
+            device: The device the model is on
+            target_dtype: The dtype to convert weights to (default: bfloat16)
+
+        Returns:
+            True if checkpoint was loaded, False if no checkpoint exists
+        """
+        # First, check for distributed checkpoint format (new fast format)
+        distributed_ckpt_path = self.checkpoint_dir / "distributed_ckpt"
+        if distributed_ckpt_path.exists():
+            try:
+                import torch.distributed.checkpoint as dcp
+                from torch.distributed.checkpoint.state_dict import (
+                    get_state_dict,
+                    set_state_dict,
+                    StateDictOptions,
+                )
+
+                self.logger.info(
+                    f"Loading FSDP model from distributed checkpoint: {distributed_ckpt_path}"
+                )
+
+                # Get current sharded state dict structure
+                model_state, _ = get_state_dict(
+                    model,
+                    optimizers=None,
+                    options=StateDictOptions(
+                        full_state_dict=False,
+                        cpu_offload=True,
+                    ),
+                )
+
+                state_dict = {"model": model_state}
+
+                # Load sharded checkpoint
+                dcp.load(
+                    state_dict,
+                    checkpoint_id=str(distributed_ckpt_path),
+                )
+
+                # Apply loaded state to model
+                set_state_dict(
+                    model,
+                    optimizers=None,
+                    model_state_dict=state_dict["model"],
+                    optim_state_dict=None,
+                    options=StateDictOptions(
+                        full_state_dict=False,
+                        cpu_offload=True,
+                    ),
+                )
+
+                self.logger.info(
+                    "FSDP model loaded from distributed checkpoint successfully"
+                )
+
+                # Load metadata
+                metadata = self._load_metadata()
+                if metadata:
+                    self.bundle.epoch = metadata.epoch
+                    self.bundle.global_step = metadata.global_step
+                    self.bundle.tokens_processed = metadata.tokens_processed
+                    self.bundle.train_loss = metadata.train_loss
+                    self.bundle.val_loss = metadata.val_loss
+
+                return True
+
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to load distributed checkpoint: {e}, trying legacy format"
+                )
+
+        # Fall back to legacy safetensors format
+        if not self.paths.exists():
+            self.logger.info(
+                f"No checkpoint found at {self.paths.model}, starting fresh"
+            )
+            return False
+
+        try:
+            self.logger.info(
+                f"Loading model weights from {self.paths.model} (FSDP legacy mode)"
+            )
+            # Load full state dict on CPU first (memory efficient)
+            state_dict = load_safetensors(str(self.paths.model), device="cpu")
+
+            # Clean up any DDP/FSDP prefixes from previous saves
+            cleaned_state_dict = _clean_fsdp_state_dict_keys(state_dict)
+
+            # Try using FSDP's state dict helpers
+            try:
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+                with FSDP.state_dict_type(
+                    model,
+                    state_dict_type=FSDP.StateDictType.FULL_STATE_DICT,
+                ):
+                    # Move tensors to correct dtype
+                    cleaned_state_dict = {
+                        k: v.to(dtype=target_dtype)
+                        for k, v in cleaned_state_dict.items()
+                    }
+                    incompatible = model.load_state_dict(
+                        cleaned_state_dict, strict=False
+                    )
+            except (ImportError, AttributeError, RuntimeError) as e:
+                # Fallback for FSDP2 (fully_shard) which may not have state_dict_type
+                self.logger.debug(
+                    f"FSDP1 state_dict_type not available: {e}, using direct load"
+                )
+                cleaned_state_dict = {
+                    k: v.to(dtype=target_dtype) for k, v in cleaned_state_dict.items()
+                }
+                incompatible = model.load_state_dict(cleaned_state_dict, strict=False)
+
+            if incompatible.missing_keys:
+                self.logger.warning(f"Missing keys: {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                self.logger.warning(f"Unexpected keys: {incompatible.unexpected_keys}")
+            self.logger.info("Model weights loaded successfully (FSDP legacy mode)")
+
+            # Also load metadata into bundle if available
+            metadata = self._load_metadata()
+            if metadata:
+                self.bundle.epoch = metadata.epoch
+                self.bundle.global_step = metadata.global_step
+                self.bundle.tokens_processed = metadata.tokens_processed
+                self.bundle.train_loss = metadata.train_loss
+                self.bundle.val_loss = metadata.val_loss
+
+            return True
+
+        except Exception as e:
+            self.logger.warning(
+                f"FSDP checkpoint loading failed: {e}, continuing with fresh weights"
+            )
+            return False
 
     def exists(self) -> bool:
         """Check if a valid checkpoint exists."""
@@ -565,6 +947,25 @@ def _clean_state_dict_keys(
         logger.info("Adding 'module.' prefix to checkpoint keys")
         return {f"module.{k}": v for k, v in state_dict.items()}
     return state_dict
+
+
+def _clean_fsdp_state_dict_keys(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Clean state dict keys for FSDP model loading.
+
+    Removes common prefixes added by DDP, FSDP, or compiled models.
+    """
+    cleaned = {}
+    prefixes_to_remove = ["module.", "_orig_mod.", "_fsdp_wrapped_module."]
+
+    for key, value in state_dict.items():
+        clean_key = key
+        for prefix in prefixes_to_remove:
+            if clean_key.startswith(prefix):
+                clean_key = clean_key.replace(prefix, "", 1)
+        cleaned[clean_key] = value
+
+    return cleaned
 
 
 def _flatten_state_dict(
