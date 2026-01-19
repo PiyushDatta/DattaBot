@@ -7,9 +7,9 @@ import torch.nn.functional as F
 from src.agent_config import get_agent_config
 from src.api_interface import DattaBotAPIResponse
 from src.logger import get_logger
-from src.model import DattaBotModel
+from src.model.model import DattaBotModel
 from src.tokenizer import get_tokenizer
-from src.util import get_logging_level_from_config, is_rank_0, is_autocast_enabled
+from src.util import get_logging_level_from_config, is_autocast_enabled, is_rank_0
 from torch import nn, Tensor
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel

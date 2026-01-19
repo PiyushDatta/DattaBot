@@ -1,7 +1,7 @@
 import pytest
 import torch
 import torch.cuda.amp as amp
-from src.model import DattaBotModel
+from src.model.model import DattaBotModel
 from src.tokenizer import get_tokenizer
 from src.util import is_device_cpu
 

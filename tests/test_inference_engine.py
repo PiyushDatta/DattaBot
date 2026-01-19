@@ -3,9 +3,8 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 from src.api_interface import DattaBotAPIResponse
-
 from src.inference_engine import DattaBotInferenceEngine
-from src.model import DattaBotModel
+from src.model.model import DattaBotModel
 from torch import nn
 
 

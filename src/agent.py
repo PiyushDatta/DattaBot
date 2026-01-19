@@ -24,7 +24,7 @@ from src.data_loader import DattabotDataBuilder
 from src.gpu_profiler import BackgroundGPUProfiler
 from src.logger import get_logger
 from src.metric_tracker import get_metric_tracker, MetricTracker
-from src.model import DattaBotModel
+from src.model.model import DattaBotModel
 from src.tokenizer import get_tokenizer
 from src.training_engine import DattaBotTrainingEngine, TrainingMode
 from src.util import (
@@ -52,6 +52,7 @@ class Agent:
         self.agent_name = self.config.agent.agent_name
         self.tensor_dtype = get_tensor_dtype_from_config(self.config)
         self.autocast_dtype = torch.bfloat16
+        self.batch_size = self.config.agent.batch_size
         # Initialize the default distributed process group before doing anything else.
         setup_torch_dist_init()
         self.local_rank = 0
@@ -104,7 +105,7 @@ class Agent:
             self.chkpt_manager.bundle.train_loss = metadata.train_loss
             self.chkpt_manager.bundle.val_loss = metadata.val_loss
         # Monitoring tools.
-        self.metric_tracker: MetricTracker | None = None
+        self.metric_tracker: MetricTracker | None = get_metric_tracker()
         self.gpu_profiler: BackgroundGPUProfiler | None = BackgroundGPUProfiler(
             device=self.device
         )
@@ -355,6 +356,7 @@ class Agent:
             num_val_tokens_processed=result.response.num_val_tokens_processed,
             num_train_batches=result.response.num_train_batches,
             num_val_batches=result.response.num_val_batches,
+            batch_size=self.batch_size,
             training_score=result.train_loss,
             validation_score=result.val_loss,
             dataset_name=train_dataloader.dataset_type.value,
@@ -372,6 +374,7 @@ class Agent:
         num_val_tokens_processed: int,
         num_train_batches: int,
         num_val_batches: int,
+        batch_size: int,
         training_score: float,
         validation_score: float,
         dataset_name: str,
@@ -384,13 +387,13 @@ class Agent:
         """Log final training summary using MetricTracker (W&B or other backend)."""
         gpu_name, total_memory, total_cores = self._get_gpu_info()
 
-        if self.metric_tracker.active:
+        if self.metric_tracker and self.metric_tracker.active:
             self.metric_tracker.log_metrics(
                 {
                     "summary/agent_name": str(agent_name),
                     "summary/dataset_name": str(dataset_name),
                     "summary/vocab_length": len(vocab),
-                    "summary/batch_size": self.batch_size,
+                    "summary/batch_size": batch_size,
                     "summary/train_batches_completed": num_train_batches,
                     "summary/val_batches_completed": num_val_batches,
                     "summary/train_tokens_processed": num_train_tokens_processed,

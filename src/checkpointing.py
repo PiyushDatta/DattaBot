@@ -316,7 +316,8 @@ class DattaBotCheckpointManager(metaclass=Singleton):
                 self._save_metadata(metadata)
                 self.logger.info(
                     f"Checkpoint saved: epoch={self.bundle.epoch}, step={self.bundle.global_step}, "
-                    f"train_loss={f'{self.bundle.train_loss:.4f}' if self.bundle.train_loss is not None else 'N/A'}"
+                    f"train_loss={f'{self.bundle.train_loss:.4f}' if self.bundle.train_loss is not None else 'N/A'}, "
+                    f"val_loss={f'{self.bundle.val_loss:.4f}' if self.bundle.val_loss is not None else 'N/A'}"
                 )
 
             # Barrier to ensure all ranks wait for save to complete
