@@ -39,7 +39,7 @@ agent:
     fsdp: true
     training_sync_interval: 32
     # Profiling settings
-    enable_profiling: true
+    enable_profiling: false
     profiling_num_steps: 20
 inference:
     max_new_tokens: 512
