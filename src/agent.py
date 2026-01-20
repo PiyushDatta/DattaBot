@@ -155,31 +155,16 @@ class Agent:
             self.logger.info(
                 "Using FSDP with CPU initialization for large model support"
             )
-
             # Materialize and initialize on CPU first
             model.to_empty(device=torch.device("cpu"))
             model.init_weights()
-
             # Convert to target dtype before sharding
             model = model.to(dtype=self.autocast_dtype)
-
             total_params = sum(p.numel() for p in model.parameters())
             self.logger.info(f"Total model parameters: {total_params:,}")
             self.logger.info(f"Model initialized on CPU, applying FSDP sharding...")
-
             # Apply FSDP sharding - this will shard and move to GPUs
-            fsdp_kwargs = {
-                "mp_policy": MixedPrecisionPolicy(
-                    param_dtype=self.autocast_dtype,
-                    reduce_dtype=self.autocast_dtype,
-                )
-            }
-            for layer in model.layers:
-                fully_shard(layer, **fsdp_kwargs)
-            fully_shard(model, **fsdp_kwargs)
-            assert isinstance(model, FSDPModule)
-            self.logger.info("FSDP sharding applied, model distributed across GPUs")
-
+            model = self._distribute_model(model=model)
             # Load checkpoint if exists using checkpoint manager
             chkpt_manager = get_checkpoint_manager(self.config.agent.weights_file_name)
             chkpt_manager.load_model_fsdp(
@@ -231,6 +216,7 @@ class Agent:
                     fully_shard(layer, **fsdp_kwargs)
                 fully_shard(model, **fsdp_kwargs)
                 assert isinstance(model, FSDPModule)
+                self.logger.info("FSDP sharding applied, model distributed across GPUs")
             else:
                 model = nn.parallel.DistributedDataParallel(
                     model,
