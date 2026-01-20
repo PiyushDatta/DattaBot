@@ -477,9 +477,8 @@ class DattaBotCheckpointManager(metaclass=Singleton):
             raise ValueError("Bundle not configured. Set bundle.unwrapped_model first.")
 
         distributed_ckpt_path = self.checkpoint_dir / "distributed_ckpt"
-        has_valid_ckpt = (
-            distributed_ckpt_path.exists()
-            and any(distributed_ckpt_path.glob("*.distcp"))
+        has_valid_ckpt = distributed_ckpt_path.exists() and any(
+            distributed_ckpt_path.glob("*.distcp")
         )
         if not has_valid_ckpt:
             self.logger.info(f"No FSDP checkpoint found at {distributed_ckpt_path}")
@@ -628,9 +627,8 @@ class DattaBotCheckpointManager(metaclass=Singleton):
         """
         # First, check for distributed checkpoint format (new fast format)
         distributed_ckpt_path = self.checkpoint_dir / "distributed_ckpt"
-        has_valid_ckpt = (
-            distributed_ckpt_path.exists()
-            and any(distributed_ckpt_path.glob("*.distcp"))
+        has_valid_ckpt = distributed_ckpt_path.exists() and any(
+            distributed_ckpt_path.glob("*.distcp")
         )
         if has_valid_ckpt:
             try:
@@ -644,7 +642,9 @@ class DattaBotCheckpointManager(metaclass=Singleton):
                         f".metadata file is missing. The checkpoint may have been interrupted "
                         f"during save. Falling back to legacy format."
                     )
-                    raise FileNotFoundError("Missing .metadata file in distributed checkpoint")
+                    raise FileNotFoundError(
+                        "Missing .metadata file in distributed checkpoint"
+                    )
 
                 self.logger.info(
                     f"Loading FSDP model from distributed checkpoint: {distributed_ckpt_path}"

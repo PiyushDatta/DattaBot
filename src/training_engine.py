@@ -10,6 +10,7 @@ Handles different training modes:
 - POSTTRAIN_VALIDATION: Validation during post-training
 """
 
+import os
 import time
 import traceback
 from contextlib import nullcontext
@@ -20,6 +21,7 @@ from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
+import torch.profiler
 import tqdm
 from src.agent_components import DattaBotAgentComponents
 from src.agent_config import get_agent_config
@@ -186,6 +188,9 @@ class DattaBotTrainingEngine:
         self._post_epoch_hooks: dict[TrainingMode, list[Callable]] = {}
         self._pre_step_hooks: dict[TrainingMode, list[Callable]] = {}
         self._post_step_hooks: dict[TrainingMode, list[Callable]] = {}
+        # Profiler state
+        self._profiler: Optional[torch.profiler.profile] = None
+        self._profiler_log_dir: Optional[str] = None
         # Training state (reset before each training run)
         self._reset_training_state()
 
@@ -197,6 +202,81 @@ class DattaBotTrainingEngine:
         self.avg_train_loss = 0.0
         self.avg_val_loss = 0.0
         self.best_val_loss = float("inf")
+
+    # =========================================================================
+    # Profiler Methods
+    # =========================================================================
+
+    def _setup_profiler(self, num_steps: int) -> None:
+        """
+        Setup the PyTorch profiler for training.
+        Called at the start of training if profiling is enabled.
+        """
+        data_dir = self.config.agent.data_directory
+        self._profiler_log_dir = os.path.join(data_dir, "training_profiler")
+        os.makedirs(self._profiler_log_dir, exist_ok=True)
+
+        self.logger.info(f"Profiler enabled - will profile first {num_steps} steps")
+        self.logger.info(f"Profile output: {self._profiler_log_dir}")
+
+        # Calculate schedule: wait 1, warmup 2, then active for remaining steps
+        wait_steps = 1
+        warmup_steps = 2
+        active_steps = max(1, num_steps - wait_steps - warmup_steps)
+
+        self._profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=wait_steps,
+                warmup=warmup_steps,
+                active=active_steps,
+                repeat=1,
+            ),
+            on_trace_ready=(
+                torch.profiler.tensorboard_trace_handler(self._profiler_log_dir)
+                if is_rank_0()
+                else None
+            ),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+
+    def _start_profiler(self) -> None:
+        """Start the profiler context."""
+        if self._profiler is not None:
+            self._profiler.__enter__()
+
+    def _step_profiler(self) -> None:
+        """Call profiler.step() to advance to next profiling step."""
+        if self._profiler is not None:
+            self._profiler.step()
+
+    def _stop_profiler(self) -> None:
+        """Stop the profiler and print summary."""
+        if self._profiler is not None:
+            self._profiler.__exit__(None, None, None)
+            if is_rank_0():
+                self.logger.info("\n" + "=" * 80)
+                self.logger.info("PROFILING SUMMARY (Top 20 CUDA operations by time)")
+                self.logger.info("=" * 80)
+                print(
+                    self._profiler.key_averages().table(
+                        sort_by="cuda_time_total", row_limit=20
+                    )
+                )
+                self.logger.info("=" * 80)
+                self.logger.info(
+                    f"Full trace saved. View with:\n  tensorboard --logdir={self._profiler_log_dir}"
+                )
+            self._profiler = None
+
+    def _is_profiling_active(self) -> bool:
+        """Check if profiler is currently active."""
+        return self._profiler is not None
 
     # =========================================================================
     # Main Training Entry Point
@@ -242,6 +322,12 @@ class DattaBotTrainingEngine:
             self._log_training_start(
                 train_dataloader, vocab, num_train_batches, num_val_batches
             )
+            # Setup profiler if enabled (will profile during actual training)
+            if self.config.agent.enable_profiling:
+                profiling_steps: int = self.config.agent.profiling_num_steps
+                self._setup_profiler(num_steps=profiling_steps)
+                self._start_profiler()
+
             for epoch in range(max_epochs):
                 self.current_epoch = epoch + 1
                 self.logger.debug(f"\nEpoch {self.current_epoch}/{max_epochs}")
@@ -294,6 +380,8 @@ class DattaBotTrainingEngine:
                 )
                 # Log epoch metrics
                 self._log_epoch_metrics(train_result, val_result, self.tokens_processed)
+                # Stop profiler if it was running
+                self._stop_profiler()
                 # Save best model
                 if self.avg_val_loss < self.best_val_loss:
                     self.best_val_loss = self.avg_val_loss
@@ -532,6 +620,9 @@ class DattaBotTrainingEngine:
                     if HAS_XLA:
                         xm.mark_step()
 
+                # Step the profiler (no-op if profiling not active)
+                self._step_profiler()
+
                 # Accumulate metrics
                 total_steps += 1
                 accumulated_loss += loss.detach()
@@ -689,12 +780,3 @@ class DattaBotTrainingEngine:
             accumulated_moe_loss.item(),
             int(accumulated_tokens.item()),
         )
-
-    def _profile_training(self, num_steps=20, log_dir: Optional[str] = None):
-        """
-        Create an AgentProfiler and run the training profiler.
-        """
-        from src.agent_profiler import AgentProfiler
-
-        profiler = AgentProfiler(self, log_dir=log_dir)
-        return profiler.profile_training(num_steps=num_steps)
