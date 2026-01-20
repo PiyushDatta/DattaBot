@@ -129,7 +129,7 @@ def setup_torch_dist_init():
     if torch.cuda.is_available():
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
-        os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+        os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
         dist.init_process_group(
             backend="nccl",
             timeout=timedelta(seconds=3600),
@@ -260,8 +260,8 @@ def _setup_cuda_backend(seed: int, backend: str) -> None:
     if backend == "cuda":
         if torch.cuda.get_device_capability()[0] >= 8:
             # TF32 settings (NVIDIA Ampere+ only, compute capability >= 8.0)
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cuda.matmul.fp32_precision = "tf32"
+            torch.backends.cudnn.conv.fp32_precision = "tf32"
     torch.cuda.empty_cache()
 
 

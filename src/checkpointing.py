@@ -373,6 +373,10 @@ class DattaBotCheckpointManager(metaclass=Singleton):
                 checkpoint_id=str(self.checkpoint_dir / "distributed_ckpt"),
             )
 
+            # Barrier to ensure all ranks complete dcp.save before proceeding
+            # This ensures the .metadata file is fully written by rank 0
+            dist_barrier(device=self.bundle.device)
+
             # Save metadata (only rank 0)
             if _should_save_on_this_rank():
                 # Save loss function if provided
@@ -473,7 +477,11 @@ class DattaBotCheckpointManager(metaclass=Singleton):
             raise ValueError("Bundle not configured. Set bundle.unwrapped_model first.")
 
         distributed_ckpt_path = self.checkpoint_dir / "distributed_ckpt"
-        if not distributed_ckpt_path.exists():
+        has_valid_ckpt = (
+            distributed_ckpt_path.exists()
+            and any(distributed_ckpt_path.glob("*.distcp"))
+        )
+        if not has_valid_ckpt:
             self.logger.info(f"No FSDP checkpoint found at {distributed_ckpt_path}")
             return CheckpointMetadata()
 
@@ -481,25 +489,19 @@ class DattaBotCheckpointManager(metaclass=Singleton):
 
         try:
             import torch.distributed.checkpoint as dcp
-            from torch.distributed.checkpoint.state_dict import (
-                get_state_dict,
-                set_state_dict,
-                StateDictOptions,
-            )
 
-            # Get current sharded state dict structure
-            model_state, optimizer_state = get_state_dict(
-                self.bundle.unwrapped_model,
-                self.bundle.optimizer,
-                options=StateDictOptions(
-                    full_state_dict=False,
-                    cpu_offload=True,
-                ),
-            )
+            # Check for .metadata file (required by dcp.load)
+            metadata_file = distributed_ckpt_path / ".metadata"
+            if not metadata_file.exists():
+                raise FileNotFoundError(
+                    f"Distributed checkpoint at {distributed_ckpt_path} is incomplete: "
+                    f".metadata file is missing. The checkpoint may have been interrupted during save."
+                )
 
+            # Get current sharded state dict structure directly from model/optimizer
             state_dict = {
-                "model": model_state,
-                "optimizer": optimizer_state,
+                "model": self.bundle.unwrapped_model.state_dict(),
+                "optimizer": self.bundle.optimizer.state_dict(),
             }
 
             # Load sharded checkpoint (each rank loads its shard)
@@ -509,16 +511,8 @@ class DattaBotCheckpointManager(metaclass=Singleton):
             )
 
             # Apply loaded state to model and optimizer
-            set_state_dict(
-                self.bundle.unwrapped_model,
-                self.bundle.optimizer,
-                model_state_dict=state_dict["model"],
-                optim_state_dict=state_dict["optimizer"],
-                options=StateDictOptions(
-                    full_state_dict=False,
-                    cpu_offload=True,
-                ),
-            )
+            self.bundle.unwrapped_model.load_state_dict(state_dict["model"])
+            self.bundle.optimizer.load_state_dict(state_dict["optimizer"])
 
             self.logger.info("FSDP checkpoint loaded successfully")
 
@@ -634,30 +628,30 @@ class DattaBotCheckpointManager(metaclass=Singleton):
         """
         # First, check for distributed checkpoint format (new fast format)
         distributed_ckpt_path = self.checkpoint_dir / "distributed_ckpt"
-        if distributed_ckpt_path.exists():
+        has_valid_ckpt = (
+            distributed_ckpt_path.exists()
+            and any(distributed_ckpt_path.glob("*.distcp"))
+        )
+        if has_valid_ckpt:
             try:
                 import torch.distributed.checkpoint as dcp
-                from torch.distributed.checkpoint.state_dict import (
-                    get_state_dict,
-                    set_state_dict,
-                    StateDictOptions,
-                )
+
+                # Check for .metadata file (required by dcp.load)
+                metadata_file = distributed_ckpt_path / ".metadata"
+                if not metadata_file.exists():
+                    self.logger.warning(
+                        f"Distributed checkpoint at {distributed_ckpt_path} is incomplete: "
+                        f".metadata file is missing. The checkpoint may have been interrupted "
+                        f"during save. Falling back to legacy format."
+                    )
+                    raise FileNotFoundError("Missing .metadata file in distributed checkpoint")
 
                 self.logger.info(
                     f"Loading FSDP model from distributed checkpoint: {distributed_ckpt_path}"
                 )
 
-                # Get current sharded state dict structure
-                model_state, _ = get_state_dict(
-                    model,
-                    optimizers=None,
-                    options=StateDictOptions(
-                        full_state_dict=False,
-                        cpu_offload=True,
-                    ),
-                )
-
-                state_dict = {"model": model_state}
+                # Get current sharded state dict structure directly from model
+                state_dict = {"model": model.state_dict()}
 
                 # Load sharded checkpoint
                 dcp.load(
@@ -666,16 +660,7 @@ class DattaBotCheckpointManager(metaclass=Singleton):
                 )
 
                 # Apply loaded state to model
-                set_state_dict(
-                    model,
-                    optimizers=None,
-                    model_state_dict=state_dict["model"],
-                    optim_state_dict=None,
-                    options=StateDictOptions(
-                        full_state_dict=False,
-                        cpu_offload=True,
-                    ),
-                )
+                model.load_state_dict(state_dict["model"])
 
                 self.logger.info(
                     "FSDP model loaded from distributed checkpoint successfully"
