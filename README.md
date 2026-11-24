@@ -33,7 +33,7 @@ A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try ot
     gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --project=${PROJECT_ID} --worker=all --command="pip install hydra-core && pip install tiktoken && pip install tqdm && pip install safetensors && pip install psutil && pip install wandb && pip install datasets"
     ```
 2. Download the weights
-``` 
+```
 gcloud compute tpus tpu-vm ssh ${TPU_NAME} \
   --zone=${ZONE} \
   --project=${PROJECT_ID} \
@@ -48,75 +48,6 @@ gcloud compute tpus tpu-vm ssh ${TPU_NAME} \
 For information on python virtual environment: [notes.md](notes.md)
 
 For manual: Use `--help`, like so: `python run.py --help`
-
-# How to run fast mock unit tests only
-
-`python run.py --test`
-
-# How to run a specific unit test
-
-`python run.py --test --test-file test_model.py`
-
-# How to run only slow integration tests (real model, ~5 minutes)
-
-`python run.py --test integration`
-
-# How to run a specific unit test with integration
-
-`python run.py --test integration --test-file test_model.py`
-
-# How to run all tests (unit + integration)
-
-`python run.py --test all`
-
-# How to train agent/model
-
-`python run.py --api_cmd "train_agent"`
-
-# How to run agent profiling
-
--   To use:
-
-    `python run.py --api_cmd profile_agent_training --api_args ''`
-
--   To analyze:
-
-    `tensorboard --logdir=/home/piydatta/DattaBot/dattabot_data_dir/agent_train_profiler`
-
-# How to test api
-
-`python run.py --api_cmd "<API COMMAND>" --api_args "<API_ARGS>"`
-
-Examples:
-
--   `python run.py --api_cmd "get_encoding" --api_args "hi there"`
--   `python run.py --api_cmd "respond_to_queries" --api_args "hello there"`
--   `python run.py --api_cmd "get_random_validation_example"`
-
-Example of long query:
-
-```
-python run.py --api_cmd "respond_to_queries" --api_args "
-Question: what portion of the total lease payments is due in the next 12 months?
-
-Context:
-Table:
- | amount ( in thousands )
-2009 | $ 47760
-2010 | 48569
-2011 | 49437
-2012 | 49959
-2013 | 50546
-years thereafter | 103890
-total | 350161
-less : amount representing interest | 54857
-present value of net minimum lease payments | $ 295304
-
-entergy corporation and subsidiaries notes to financial statements as of december 31 , 2008 , system energy had future minimum lease payments ( reflecting an implicit rate of 5.13% ( 5.13 % ) ) , which are recorded as long-term debt as follows : amount ( in thousands ) .
-"
-```
-
-Answer: 13.6%
 
 # Dependencies
 
@@ -134,49 +65,10 @@ Answer: 13.6%
 
 # Goals
 
--   Fully open source - weights and all
+-   Fully safe and open source model - weights and all
 -   Accessible to anyone and everyone, and can run on their own machines (don't need to hit an endpoint or give data away to a third party)
 -   Make it the one of the best agents/models in the world
 -   To make the above true, we have to find novel ideas
-
-# Versions and results:
-
-### Base Transformer model (branch: `base_transformer`)
-
-Final results from training standard GPT transformer.
-
-Training run: https://wandb.ai/dattabot_team/DattaBotV1/runs/e3q134eq
-Weights: https://huggingface.co/datapi/dattabot-weights/blob/main/base_transformer.pt
-Validation loss: 0.083
-Training loss: 0.135
-Number of train tokens: 17 billion
-Eval on HumanEval dataset: 0.0% (0/164)
-
-Eval logs:
-07:33:21 AM UTC - INFO - logger.py - dattabot.info - Saving results to /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl...
-07:33:21 AM UTC - INFO - logger.py - dattabot.info - Running test cases...
-07:33:21 AM UTC - INFO - logger.py - dattabot.info - Downloading HumanEval dataset from HuggingFace...
-07:33:23 AM UTC - INFO - logger.py - dattabot.info - Loaded 164 HumanEval problems
-07:33:23 AM UTC - INFO - logger.py - dattabot.info - Evaluating 164 samples across 164 tasks...
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - Completed 164 evaluations
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - Total passed: 0/164 (0.0%)
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - HumanEval evaluation completed successfully!
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ✓ HUMANEVAL evaluation completed!
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - Results saved to: /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
-07:33:24 AM UTC - INFO - logger.py - dattabot.info -
-======================================================================
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - HUMANEVAL EVALUATION RESULTS
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - Problems Evaluated: 164
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - Samples per Problem: 1
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ----------------------------------------------------------------------
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - SCORES:
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - pass@1: 0.00% [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ----------------------------------------------------------------------
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - Results saved to: /home/piydatta/DattaBot/dattabot_data_dir/humaneval_results.jsonl
-07:33:24 AM UTC - INFO - logger.py - dattabot.info - ======================================================================
 
 # License
 
