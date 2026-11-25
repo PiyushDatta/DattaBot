@@ -2,7 +2,7 @@
 
 A novel AI agent/model from "scratch" (using libraries like pytorch). MAY try other approaches, like doing it in rust, if it serves value.
 
-# How to install and setup (NVIDIA/AMD/APPLE)
+# How to install and setup (NVIDIA/AMD/MLX)
 
 1. Make sure you have `uv` installed
     - https://docs.astral.sh/uv/getting-started/installation/#installation-methods
